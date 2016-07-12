@@ -1,0 +1,8 @@
+Stringprep implementation for ejabberd
+
+tools/uni_parse.tcl and tools/uni_parse2.tcl are based on tools/uniParse.tcl
+from Tcl distribution, and they generate c_src/uni_data.c and
+c_src/uni_norm.c.  Those files are distributed under BSD-style Tcl/Tk license
+(see LICENSE.TCL).
+
+The rest of the code is under GPL version 2 or above.

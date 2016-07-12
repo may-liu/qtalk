@@ -1,0 +1,21 @@
+{require_min_otp_vsn, "16"}.
+
+Cfg = case file:consult("vars.config") of
+          {ok, Terms} ->
+              Terms;
+          _Err ->
+              []
+      end ++ [{cflags, ""}, {ldflags, ""}],
+{cflags, CfgCFlags} = lists:keyfind(cflags, 1, Cfg),
+{ldflags, CfgLDFlags} = lists:keyfind(ldflags, 1, Cfg),
+
+[{erl_opts, [debug_info]},
+ {port_env, [{"CFLAGS", "$CFLAGS " ++ CfgCFlags ++ " -O2 -Wall"},
+             {"LDFLAGS", "$LDFLAGS " ++ CfgLDFlags ++ " -lssl -lcrypto"}]},
+ {port_specs, [{"priv/lib/p1_tls_drv.so", ["c_src/p1_tls_drv.c"]},
+               {"priv/lib/p1_sha.so", ["c_src/p1_sha.c"]}]}].
+
+%% Local Variables:
+%% mode: erlang
+%% End:
+%% vim: set filetype=erlang tabstop=8:

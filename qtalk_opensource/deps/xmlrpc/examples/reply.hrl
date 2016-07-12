@@ -1,0 +1,2 @@
+
+-record(reply, {tag, val}).

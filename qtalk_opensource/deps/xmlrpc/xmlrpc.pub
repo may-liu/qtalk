@@ -1,0 +1,11 @@
+{author,"Joakim Grebenö","jocke@gleipnir.com","030107"}.
+{name,"xmlrpc"}.
+{vsn,{1, 15}}.
+{summary,"An XML-RPC client/server library"}.
+{keywords,["XML","XML-RPC","RPC"]}.
+{needs,[{"xmerl",{0,18}}]}.
+{abstract,
+ "This is an HTTP 1.1 compliant XML-RPC library for Erlang. It is
+designed to make it easy to write XML-RPC Erlang clients and/or
+servers. The library is compliant with the XML-RPC specification
+published by http://www.xmlrpc.org/."}.

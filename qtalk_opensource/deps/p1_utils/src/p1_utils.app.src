@@ -1,0 +1,12 @@
+{application, p1_utils,
+ [
+  {description, "Utility modules from ProcessOne"},
+  {vsn, "1"},
+  {modules, []},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.

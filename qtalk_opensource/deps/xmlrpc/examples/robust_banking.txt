@@ -1,0 +1,140 @@
+This is a companion to Joe Armstrong's tutorial on how to build a
+fault-tolerant banking server in Erlang:
+
+http://www.sics.se/~joe/tutorials/robust_server/robust_server.html 
+
+You *should* read Joe's tutorial before you go any further. You have
+been warned!
+
+1 A fault-tolerant banking server using XML-RPC
+-----------------------------------------------
+It is easy to update Joe's banking server with XML-RPC support. Just
+replace the robust_bank_server.erl and robust_bank_client.erl modules
+with the drop-in replacements found in this directory.
+
+Do that.
+
+The original modules look like this:
+http://www.sics.se/~joe/tutorials/robust_server/robust_bank_server.erl
+http://www.sics.se/~joe/tutorials/robust_server/robust_bank_client.erl
+
+They are actually larger than the XML-RPC ditto.
+
+There is also a Java application (BankClient.java) which can be used
+to access the banking server. More on that below.
+
+1.1 Initializing the data-base
+------------------------------
+This assumes that there are two nodes called one@enfield and
+two@enfield.
+
+To initialize the system open two terminal windows (on enfield) and
+proceed as follows:
+
+Note: You *must* update the paths to the xmerl and xmlrpc packages.
+
+** In terminal 1:
+
+$ erl -pa xmlrpc-1.11/ebin -pa xmerl-0.18/ebin -sname one -mnesia dir '"one"'
+Erlang (BEAM) emulator version 5.2 [source] [hipe]
+
+Eshell V5.2  (abort with ^G)
+
+** In terminal 2:
+
+$ erl -pa xmlrpc-1.11/ebin -pa xmerl-0.18/ebin -sname two -mnesia dir '"two"'
+Erlang (BEAM) emulator version 5.2 [source] [hipe]
+
+Eshell V5.2  (abort with ^G)
+(two@enfield)1> robust_bank_manager:create_schema().
+ok
+(two@enfield)2> mnesia:start().
+ok
+
+** In terminal 1:
+
+(one@enfield)1> mnesia:start().
+ok
+(one@enfield)2> robust_bank_manager:create_table().
+
+1.2. Now we are ready to run everything
+---------------------------------------
+We are now ready to start the banking server on the two nodes:
+
+** In terminal 1:
+
+(one@enfield)3> robust_bank_server:start(3020).
+{ok,<0.102.0>}
+
+** In terminal 2:
+
+(two@enfield)3> robust_bank_server:start(3030).
+{ok,<0.102.0>}
+
+The XML-RPC based banking server has now been started. We open a third
+terminal window and start an Erlang node to be used as a client:
+
+** In terminal 3:
+
+$ erl -pa xmlrpc-1.11/ebin -pa xmerl-0.18/ebin
+Erlang (BEAM) emulator version 5.2 [source] [hipe]
+
+Eshell V5.2  (abort with ^G)
+1> robust_bank_client:deposit("joe", 7).
+{response,[7]}
+2> robust_bank_client:balance("joe").
+{response,[7]}
+
+Both servers are running - server one replies. Kill server one redo
+the query:
+
+3> robust_bank_client:balance("joe").
+{response,[7]}
+
+This time server 2 replies (we killed server one, remember).
+
+Make a deposit. We make a deposit of 10 units:
+
+4> robust_bank_client:deposit("joe", 10).
+{response,[17]}
+
+Only server two is running - so the transaction takes place on server two.
+
+Restart server one and query the balance:
+
+5> robust_bank_client:balance("joe").
+{response,[17]}
+
+Server one replies with 17 units. Well done server one.
+
+When server one was restarted - the two servers synced their data and
+the changes made to server two were propagated to server one.
+
+Kill server two and query the balance:
+
+6> robust_bank_client:balance("joe").
+{response,[17]}
+
+Server one replied.
+
+1.3 Lets try the Java client
+-----------------------------
+$ java -classpath apache/xmlrpc/bin/xmlrpc-1.1.jar:. BankClient deposit joe 22
+39
+$ java -classpath apache/xmlrpc/bin/xmlrpc-1.1.jar:. BankClient withdraw joe 2 
+ok
+$ java -classpath apache/xmlrpc/bin/xmlrpc-1.1.jar:. BankClient balance joe  
+37
+$ java -classpath apache/xmlrpc/bin/xmlrpc-1.1.jar:. BankClient withdraw joe 2000
+org.apache.xmlrpc.XmlRpcException: not_enough_money
+java.io.IOException: Connection refused
+No bank server available
+
+etc.
+
+2 Summing up
+------------
+The intention here was not to make the ultimate fault-tolerant server,
+but rather to illustrate how to make a simple functioning server, with
+no detail omitted. A production server could be based on this simple
+design, but would involve a slightly less simplistic approach.
