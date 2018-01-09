@@ -55,7 +55,7 @@ loglevel: 4
 ##
 log_rotate_size: 10485760
 log_rotate_date: ""
-log_rotate_count: 1
+log_rotate_count: 2
 
 ##
 ## overload protection: If you want to limit the number of messages per second
