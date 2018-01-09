@@ -49,7 +49,8 @@ start_hosts() ->
 			    false -> ok
 			  end
 		  end,
-		  ?MYHOSTS).
+%%		  ?MYHOSTS).
+	get_odbc_hosts()).
 
 %% Start the ODBC module on the given host
 start_odbc(Host, App) ->
@@ -81,3 +82,11 @@ needs_odbc(Host) ->
         odbc -> {true, odbc};
         undefined -> false
     end.
+
+get_odbc_hosts() ->
+	case ejabberd_config:get_option(pgsql_db_host, fun(V) -> V end) of
+	undefined ->
+		?MYHOSTS;
+	L ->
+		L
+	end.	

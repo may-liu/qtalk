@@ -113,22 +113,22 @@ process_local_iq(_From, _To,
 sign(N) when N < 0 -> <<"-">>;
 sign(_) -> <<"+">>.
 
-%%=======================================================
-%%			扩充时间处理函数
-%%=======================================================
-
 get_timestamp() ->
 	{MegaSecs, Secs,_MicroSec} = os:timestamp(),
 	MegaSecs * 1000000 + Secs.
 
 get_exact_timestamp() ->
-    {MegaSecs, Secs,MicroSec} = os:timestamp(),
-    MegaSecs * 1000000000 + Secs*1000+MicroSec.
+	{MegaSecs, Secs,MicroSec} = os:timestamp(),
+	1000000000 * MegaSecs + Secs * 1000 + MicroSec div 1000.
+
+get_msec_timestamp(Time) ->
+	{MegaSecs, Secs,MicroSec} = Time,
+	1000000000 * MegaSecs + Secs * 1000 + MicroSec div 1000.
+	
 
 deal_timestamp(Time) ->
 	{MegaSecs, Secs,_MicroSec} = Time,
 	MegaSecs * 1000000 + Secs.
-
 %%UTC+8:use {{1970,1,1}, {8,0,0},not use {{1970,1,1}, {0,0,0}
 datetime_to_timestamp(DateTime) ->
 	calendar:datetime_to_gregorian_seconds(DateTime) -

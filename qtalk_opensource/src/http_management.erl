@@ -1,7 +1,5 @@
 %% Feel free to use, reuse and abuse the code in this file.
-%%========================================================
-%%工具接口
-%%========================================================
+
 -module(http_management).
 
 -export([init/3]).
@@ -16,29 +14,33 @@ init(_Transport, Req, []) ->
 	{ok, Req, undefined}.
 
 handle(Req, State) ->
-   	handle(Req, State, iplimit_util:check_ip(Req)).
+    {Url,_Req_t} = cowboy_req:url(Req),
+    ?DEBUG("Run http ~p ~n",[Url]),
+ %%   handle(Req, State, iplimit_util:check_ip(Req)).
+    handle(Req, State, true).
 
 handle(Req, State, false) ->
     Req_Res = Req#http_req{resp_compress = true},
-    Res = http_utils:gen_result(false, 3, <<"ip is limited">>),
+    Res = http_utils:gen_result(false, <<"3">>, <<"ip is limited">>),
     {ok, NewReq} = cowboy_req:reply(200, [
                                     {<<"content-type">>, <<"text/plain; charset=utf-8">>}
                                    ], Res, Req_Res),
     {ok, NewReq, State};
 handle(Req, State, _) ->
-	{Method, _ } = cowboy_req:method(Req),
+	{Method, Req2} = cowboy_req:method(Req),
 	case Method of 
 	<<"GET">> ->
-		 Req2 = cowboy_req:reply(200, [ {<<"content-type">>, <<"text/json; charset=utf-8">>}], 
-					http_utils:gen_result(false, 2, <<"No Get Method">>) , Req),
-		{ok, Req2, State};
+	    {Host,Req3} =  cowboy_req:host(Req),
+		 Req4 = cowboy_req:reply(200, [ {<<"content-type">>, <<"text/json; charset=utf-8">>}], 
+					http_utils:gen_result(false, <<"-1">>, <<"No Get Method">>) , Req3),
+		{ok, Req4, State};
 	<<"POST">> ->
-		HasBody = cowboy_req:has_body(Req),
-		{ok, Req2} = post_echo(Method, HasBody, Req),
-		{ok, Req2, State};
+		HasBody = cowboy_req:has_body(Req2),
+		{ok, Req3} = post_echo(Method, HasBody, Req2),
+		{ok, Req3, State};
 	_ ->
-		{ok,Req2} = echo(undefined, Req),
-		{ok, Req2, State}
+		{ok,Req3} = echo(undefined, Req2),
+		{ok, Req3, State}
 	end.
     	
 get_echo(<<"GET">>,_,Req) ->
@@ -47,17 +49,19 @@ get_echo(<<"GET">>,_,Req) ->
 		], <<"No GET method">>, Req).
 
 post_echo(<<"POST">>, true, Req) ->
-    {ok, Body, _} = cowboy_req:body(Req),
-	{Host,_} =  cowboy_req:host(Req),
+    {ok, Body, Req2} = cowboy_req:body(Req),
+    {Host,Req3} =  cowboy_req:host(Req),
+	{Online,Req4} = cowboy_req:qs_val(<<"online">>, Req),
     Servers = ejabberd_config:get_myhosts(),
     Server = lists:nth(1,Servers),
-	case catch rfc4627:decode(Body) of
-	{ok,  {obj,Args },[]} -> 
-	    if Host =/= <<"api.test.com">> ->
-			Res = do_cmd(Server,Args),
+	case rfc4627:decode(Body) of
+	{ok,Json,[]} -> 
+	    if Host =/= <<"xxxxxxxxx.com">> ->
+			Res = do_cmd(Server,Json),
 			cowboy_req:reply(200, [{<<"content-type">>, <<"text/json; charset=utf-8">>}], Res, Req);
 		true ->
-			Res = http_utils:gen_result(false, 4, <<"No Wlan Api">>),
+			Res = http_utils:gen_result(false, <<"-1">>, <<"No Wlan Api">>),
+%%			{Key,NewReq1} = cowboy_req:qs_val(<<"k">>, NewReq),
 			cowboy_req:reply(200, [	{<<"content-type">>, <<"text/json; charset=utf-8">>}], Res, Req)
 		end;
 	_ ->
@@ -79,7 +83,8 @@ echo(Echo, Req) ->
 terminate(_Reason, _Req, _State) ->
 	ok.
 
-do_cmd(Server,Args) ->
+do_cmd(Server,Json) ->
+	[{obj,Args }] = Json ,
 	case parse_cmd(Args) of 
 	1 ->
 		management_cmd:get_user_num(Server,Args);
@@ -121,11 +126,17 @@ do_cmd(Server,Args) ->
 		management_cmd:delete_iplimit(Server,Args);
 	19->
 		management_cmd:get_user_rescource(Server,Args);
+	20 ->
+		management_cmd:get_user_rescource_list(Server,Args);
+	21 ->
+		management_cmd:migrate_one_muc_by_name(Server,Args);
+	22 ->
+		management_cmd:migrate_num_mucs(Server,Args);
+    24 ->
+        management_cmd:add_muc_users(Server,Args);
 	_ ->
-		http_utils:gen_result(false, 5, <<"No find cmd">>)
+		http_utils:gen_result(false, <<"-1">>, <<"No find cmd">>)
 	end.
 
 parse_cmd(Args) ->
-	http_utils:to_integer(proplists:get_value("cmd",Args,0),0).
-
-	
+	http_utils:to_integer(proplists:get_value("cmd",Args),0).

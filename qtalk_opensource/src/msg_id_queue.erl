@@ -20,7 +20,7 @@ start_link(Host,Opts) ->
 init([Server,_Opts]) ->
 	mod_msg_id_queue:add_pid(Server,self()),
 	Timer_Tref = 
-    	   erlang:start_timer(1000,self(),update_queue),
+    	   erlang:start_timer(5000,self(),update_queue),
 	{ok, #state{server = Server,max_size = ?MAXSIZE,queue_in_timer = Timer_Tref,msg_queue = queue:new()}}.
 
 handle_call(stop, _From, State=#state{queue_in_timer = Timer_Tref}) ->
@@ -31,13 +31,21 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({in, Msg}, State = #state{max_size=Max,msg_queue=OldQueue}) ->
 	Queue = 
-		case Max =< queue:len(OldQueue) of
-		true -> 
-			queue:liat(OldQueue);
-		false -> 
-			OldQueue
-		end,
-	{noreply, State#state{msg_queue = queue:in(Msg, Queue)}};
+		case queue:member(Msg,OldQueue) of
+		true ->
+			?INFO_MSG("ID [~p] is already in queue. ~n",[Msg]),
+			OldQueue;
+		_ ->
+			case Max =< queue:len(OldQueue) of
+			true ->
+				Q1 = queue:liat(OldQueue),
+				queue:in(Msg, Q1);
+			_ ->
+				queue:in(Msg,OldQueue)
+			end
+		end,	
+		
+	{noreply, State#state{msg_queue = Queue}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -45,7 +53,7 @@ handle_info({timeout, TimerRef, update_queue},State=#state{server = Server,msg_q
 	case erlang:read_timer(TimerRef) of
 	false ->
 		do_update_msg_id(Server,Queue),
-		New_Timer_Tref = erlang:start_timer(1000,self(),update_queue),
+		New_Timer_Tref = erlang:start_timer(5000,self(),update_queue),
 		NewQueue = queue:new(),
 		NewState = State#state{queue_in_timer = New_Timer_Tref,msg_queue = NewQueue},
 		{noreply, NewState};
@@ -58,12 +66,15 @@ handle_info({timeout, TimerRef, update_queue},State=#state{server = Server,msg_q
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{server = Server}) ->
-	mod_msg_id_queue:remove_pid(Server,self()),
+terminate(_Reason, State=#state{server = Host}) ->
+	mod_msg_id_queue:remove_pid(Host,self()),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+get_proc_name(Host) ->
+    gen_mod:get_module_proc(Host, ?MODULE).
 
 do_update_msg_id(Host,Queue) ->
 	IDs = queue:to_list(Queue),
@@ -71,8 +82,8 @@ do_update_msg_id(Host,Queue) ->
 	[] ->
 		ok;
 	_ ->
-		catch async_sql:update_readmark_by_id(Host,IDs)
+		catch asy_sql:update_readmark_by_id(Host,IDs)
 	end.
 
 queue_in(Msg,Host) ->
-	gen_server:cast(mod_msg_id_queue:get_random_pid(Host), {in, Msg}).
+	gen_server:cast(mod_msg_id_queue:get_pid_by_id(Host,Msg), {in, Msg}).

@@ -29,24 +29,24 @@
 
 -export([get_db_type/0, update_t/4, insert_t/3, sql_transaction/2,update_no_insert/4,insert_t_no_single_quotes/3,
 	 get_last/2, set_last_t/4, del_last/2, get_password/2, get_blacklist/1,
-	 set_password_t/3, add_user/3, del_user/2,insert_msg/6,insert_day_online/4,
-	 del_user_return_password/3, list_users/1, list_users/2,insert_muc_msg/7,insert_muc_users/5,insert_muc_users_sub_push/5,
-	 users_number/1, users_number/2, add_spool_sql/3,add_spool_sql_no_notice/3,
+	 set_password_t/3, add_user/3, del_user/2,insert_msg/6,insert_msg1/6,insert_msg2/8,insert_msg3/8,insert_day_online/4,insert_msg4/8,
+	 del_user_return_password/3, list_users/1, list_users/2,insert_muc_msg/7,insert_muc_msg1/8,insert_muc_users/5,insert_muc_users_sub_push/5,
+	 users_number/1, users_number/2, add_spool_sql/3,add_spool_sql_no_notice/3,restore_muc_user_mark/2,insert_muc_msg2/9,
+	 insert_muc_msg3/8,insert_muc_msg4/9,
 	 get_muc_history/3,get_muc_users/3,del_muc_user/4,get_user_mucs/3,del_muc_users/3,
-	 clear_muc_users/1,clear_muc_spool/1,clear_spool/1,get_muc_msg_last_timestamp/2,del_muc_vcard_info/2,get_muc_last_name_and_time/1,
+	 clear_muc_users/1,clear_muc_spool/1,clear_spool/1,get_muc_msg_last_timestamp/2,del_muc_vcard_info/3,get_muc_last_name_and_time/1,
 	 add_spool/2, get_and_del_spool_msg_t/2, del_spool_msg/2,get_muc_msg_info/4,get_muc_msg_info1/4,get_last_muc_msg_time/3,
 	 get_roster/2, get_roster_jid_groups/2,get_roster_info/1,get_department_info/1,
 	 insert_muc_last/3,delete_muc_last/2,update_muc_last/4,update_muc_last_create_time/3,
-	 get_roster_groups/3, del_user_roster_t/2,get_msg_info/5,get_msg_info1/5,get_msg_info2/4,
-	 get_roster_by_jid/3, get_rostergroup_by_jid/3,get_user_suoxie/1,get_white_list_users/1,get_iplimit/1, insert_iplimit/3,delete_iplimit/2,
+	 get_roster_groups/3, del_user_roster_t/2,get_msg_info/5,get_msg_info1/5,get_msg_info2/4,get_muc_msg_info2/3,
+	 get_roster_by_jid/3, get_rostergroup_by_jid/3,get_white_list_users/1,get_iplimit/1, insert_iplimit/3,delete_iplimit/2,
 	 del_roster/3, del_roster_sql/2, update_roster/5,get_user_muc_subscribe/2,del_user_muc_subscribe/3,add_user_muc_subscribe/3,
 	 update_roster_sql/4, roster_subscribe/4,insert_subscribe_msg/5,del_muc_spool/2,add_spool_away/5,
-	 get_subscription/3, set_private_data/4,get_concats/2,get_muc_concats/2,
+	 get_subscription/3, set_private_data/4,get_concats/2,get_muc_concats/2,get_user_muc_subscribe_v2/2,
 	 get_use_registed_muc_num/2,update_whitelist/2,delete_whitelist/2,clear_user_mac_key/1,
-	 get_muc_vcard_info/1,set_muc_vcard_info/6,insert_muc_vcard_info/7,get_muc_vcard_version/2,get_muc_vcard_info_by_name/2,
 	 set_private_data_sql/3, get_private_data/3, get_private_data/2,
-	 insert_user_mac_key/4,update_user_mac_key/4,
-	 insert_vcard_version/4,update_vcard_version/3,get_vcard_version/1,get_vcard_version_by_user/2,
+	 insert_muc_vcard_info/7,del_user_register_mucs/2,
+	 insert_user_mac_key/4,update_user_mac_key/4,insert_user_register_mucs/4,update_register_mucs/5,
 	 del_user_private_storage/2, get_default_privacy_list/2,
 	 get_default_privacy_list_t/1, get_privacy_list_names/2,
 	 get_privacy_list_names_t/1, get_privacy_list_id/3,
@@ -68,6 +68,7 @@
 	 get_roster_version/2,
 	 set_roster_version/2,
      update_blacklist/2]).
+-export([insert_msg5/8,insert_msg6/8]).
 
 %% We have only two compile time options for db queries:
 %-define(generic, true).
@@ -80,7 +81,6 @@
 
 -endif.
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 
 %% Almost a copy of string:join/2.
@@ -128,12 +128,12 @@ insert_t_no_single_quotes(Table, Fields, Vals) ->
 get_concats(LServer,Username) ->
     ejabberd_odbc:sql_query(LServer,
                 [<<"select u from (select case when m_from = '">>,Username,
-		                <<"' then m_to else m_from end as u,max(m_timestamp) as m_time from msg_history where m_from = '">>,Username,
+		                <<"' then m_to else m_from end as u,max(create_time) as m_time from msg_history where m_from = '">>,Username,
 						                <<"' or m_to='">>,Username,<<"' group by m_from,m_to ) tab order by tab.m_time desc ;">>]).	
 
 get_muc_concats(LServer,Username) ->
     ejabberd_odbc:sql_query(LServer,
-			[<<"select muc_name from  (select muc_room_name as muc_name,max(m_timestamp) as m_time from muc_room_history where muc_room_name in (select muc_name from muc_room_users where username = '">>,Username,<<"') group by muc_room_name) tab order by m_time desc ">>]).
+			[<<"select muc_name from  (select muc_room_name as muc_name,max(create_time) as m_time from muc_room_history where muc_room_name in (select muc_name from muc_room_users where username = '">>,Username,<<"') group by muc_room_name) tab order by m_time desc ">>]).
 
 update_no_insert(Table, Fields, Vals, Where) ->
     UPairs = lists:zipwith(fun (A, B) ->
@@ -199,7 +199,7 @@ get_mac_users(LServer) ->
 get_password(LServer, Username) ->
     ejabberd_odbc:sql_query(LServer,
 			    [<<"select password from users where username='">>,
-			     Username, <<"';">>]).
+			     Username, <<"' and hire_flag > 0;">>]).
 
 set_password_t(LServer, Username, Pass) ->
     ejabberd_odbc:sql_transaction(LServer,
@@ -226,16 +226,46 @@ insert_user_mac_key(LServer,Username,Host,Mackey) ->
 insert_sql(LServer,Sql) ->
 	ejabberd_odbc:sql_query(LServer,[Sql]).
 
-insert_vcard_version(LServer,Username,Version,Url) ->
-	ejabberd_odbc:sql_query(LServer,
-				[<<"insert into vcard_version(username,version,url) values ('">>,
-					Username,<<"',">>,Version,<<",'">>,Url,<<"');">>]).
-
 insert_msg(LServer,From,To,Body,Msg_id,Time) ->
 	ejabberd_odbc:sql_query(LServer,
 				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,m_timestamp)"
 					"values ('">>,
 				From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,integer_to_list(Time),<<"');">>]).
+
+insert_msg1(LServer,From,To,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,m_timestamp,read_flag)"
+					"values ('">>,
+				From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,integer_to_list(Time),<<"',1);">>]).
+
+insert_msg2(LServer,From,To,From_host,To_host,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,from_host,to_host,m_timestamp)"
+					"values ('">>,
+				From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,From_host,<<"','">>,To_host,<<"','">>,integer_to_list(Time),<<"');">>]).
+
+insert_msg3(LServer,From,To,From_host,To_host,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,from_host,to_host,m_timestamp,read_flag)"
+					"values ('">>,
+			From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,From_host,<<"','">>,To_host,<<"','">>,integer_to_list(Time),<<"',1);">>]).
+
+insert_msg4(LServer,From,To,From_host,To_host,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into warn_msg_history(m_from,m_to,m_body,msg_id,from_host,to_host,read_flag,create_time)"
+					"values ('">>,
+			From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,From_host,<<"','">>,To_host,<<"',">>,<<"1,">>,Time,<<");">>]).
+
+insert_msg5(LServer,From,To,From_host,To_host,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,from_host,to_host,read_flag,create_time)"
+					"values ('">>,
+			From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,From_host,<<"','">>,To_host,<<"',1,">>,Time,<<");">>]).
+
+insert_msg6(LServer,From,To,From_host,To_host,Body,Msg_id,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into msg_history(m_from,m_to,m_body,msg_id,from_host,to_host,create_time) values ('">>,
+				From,<<"','">>,To,<<"','">>,Body,<<"','">>,Msg_id,<<"','">>,From_host,<<"','">>,To_host,<<"',">>,Time,<<");">>]).
 
 insert_day_online(LServer,Username,Date,OnlineTime) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -248,15 +278,41 @@ insert_muc_msg(LServer,Muc_name,Nick,Packet,Have_sub,Size,Time) ->
 			Muc_name,<<"','">>,Nick,<<"','">>,Packet,<<"',">>,atom_to_list(Have_sub),<<",'">>,
 			integer_to_list(Size),<<"','">>,integer_to_list(Time),<<"');">>]).
 
-insert_muc_users(LServer,Tabname,Muc_name,Username,Host) ->
+insert_muc_msg1(LServer,Muc_name,Nick,Host,Packet,Have_sub,Size,Time) ->
 	ejabberd_odbc:sql_query(LServer,
-				[<<"insert into ">>,Tabname,<<" (muc_name,username,host) values ('">>,
-			Muc_name,<<"','">>,Username,<<"','">>,Host,<<"');">>]).
+				[<<"insert into muc_room_history(muc_room_name,nick,host,packet,have_subject,size,m_timestamp) values ('">>,
+			Muc_name,<<"','">>,Nick,<<"','">>,Host,<<"','">>,Packet,<<"',">>,atom_to_list(Have_sub),<<",'">>,
+			integer_to_list(Size),<<"','">>,integer_to_list(Time),<<"');">>]).
+
+insert_muc_msg2(LServer,Muc_name,Nick,Host,Packet,Have_sub,Size,Time,Msg_ID) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into muc_room_history(muc_room_name,nick,host,packet,have_subject,size,m_timestamp,msg_id) values ('">>,
+			Muc_name,<<"','">>,Nick,<<"','">>,Host,<<"','">>,Packet,<<"',">>,atom_to_list(Have_sub),<<",'">>,
+			integer_to_list(Size),<<"','">>,integer_to_list(Time),<<"','">>,Msg_ID,<<"');">>]).
+
+insert_muc_msg3(LServer,Muc_name,Nick,Host,Packet,Have_sub,Size,Msg_ID) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into muc_room_history(muc_room_name,nick,host,packet,have_subject,size,msg_id) values ('">>,
+			Muc_name,<<"','">>,Nick,<<"','">>,Host,<<"','">>,Packet,<<"',">>,atom_to_list(Have_sub),<<",'">>,
+			integer_to_list(Size),<<"','">>,Msg_ID,<<"');">>]).
+
+insert_muc_msg4(LServer,Muc_name,Nick,Host,Packet,Have_sub,Size,Msg_ID,Time) ->
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into muc_room_history(muc_room_name,nick,host,packet,have_subject,size,msg_id,create_time) values ('">>,
+			Muc_name,<<"','">>,Nick,<<"','">>,Host,<<"','">>,Packet,<<"',">>,atom_to_list(Have_sub),<<",'">>,
+			integer_to_list(Size),<<"','">>,Msg_ID,<<"',">>,Time,<<");">>]).
+
+insert_muc_users(LServer,Tabname,Muc_name,Username,Host) ->
+	Time = integer_to_binary(mod_time:get_timestamp()),
+	ejabberd_odbc:sql_query(LServer,
+				[<<"insert into ">>,Tabname,<<" (muc_name,username,host,login_date) values ('">>,
+			Muc_name,<<"','">>,Username,<<"','">>,Host,<<"',">>,Time,<<");">>]).
 
 insert_muc_users_sub_push(LServer,Tabname,Muc_name,Username,Host) ->
+	Time = integer_to_binary(mod_time:get_timestamp()),
 	ejabberd_odbc:sql_query(LServer,
-				[<<"insert into ">>,Tabname,<<" (muc_name,username,host,subscribe_flag ) values ('">>,
-			Muc_name,<<"','">>,Username,<<"','">>,Host,<<"','1');">>]).
+				[<<"insert into ">>,Tabname,<<" (muc_name,username,host,subscribe_flag,login_date) values ('">>,
+			Muc_name,<<"','">>,Username,<<"','">>,Host,<<"','1',">>,Time,<<");">>]).
 
 insert_subscribe_msg(LServer,SubUsers,Mucname,Nick,Msg) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -268,24 +324,27 @@ del_user(LServer, Username) ->
 			     <<"';">>]).
 
 clear_muc_users(LServer) ->
+    Host = lists:nth(1,ejabberd_config:get_myhosts()),
     ejabberd_odbc:sql_query(LServer,
-			    [<<"delete from muc_room_users a where a.username not in (select username from users);">>]).
+			    [<<"delete from muc_room_users a where a.username not in 
+					(select username from users where hire_flag > 0) and a.host = '">>,Host,<<"';">>]).
 
 clear_spool(LServer) ->
 	ejabberd_odbc:sql_query(LServer,
-			[<<"delete from spool where username not in (select username from users);">>]).
+			[<<"delete from spool where username not in (select username from users where hire_flag > 0 );">>]).
 
 clear_user_mac_key(LServer) ->
 	ejabberd_odbc:sql_query(LServer,
-			[<<"delete from user_mac_key where user_name not in (select username from users);">>]).
+			[<<"delete from user_mac_key where user_name not in (select username from users where hire_flag > 0);">>]).
 
 clear_muc_spool(LServer) ->
 	 ejabberd_odbc:sql_query(LServer,
-			 [<<"delete from muc_spool where username not in (select username from users);">>]).
+			 [<<"delete from muc_spool where username not in (select username from users where hire_flag  > 0);">>]).
 	
 get_muc_msg_last_timestamp(LServer, Mucname) ->
     ejabberd_odbc:sql_query(LServer,
-			    [<<"select m_timestamp from muc_room_history where muc_room_name = '">>,  Mucname, <<"' order by m_timestamp desc limit 1">>]).
+		[<<"select extract(epoch from create_time) from muc_room_history where muc_room_name = '">>,  Mucname, 
+				<<"' order by create_time desc limit 1">>]).
 
 get_muc_last_name_and_time(LServer) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -295,7 +354,7 @@ get_muc_last_name_and_time(LServer) ->
 insert_muc_last(LServer,Mucname,Time) ->
 	ejabberd_odbc:sql_query(LServer,
 				[<<"insert into muc_last (muc_name,create_time) values ('">>,
-			Mucname,<<"','">>,Time,<<"');">>]).
+			Mucname,<<"','">>,integer_to_binary(Time),<<"');">>]).
 
 delete_muc_last(LServer,Mucname) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -305,29 +364,13 @@ update_user_mac_key(LServer,User,Host,Mackey) ->
 	ejabberd_odbc:sql_query(LServer,
 			[<<"update user_mac_key set mac_key  = '">>,Mackey ,<<"' where user_name = '">>,User,<<"' and host = '">>,Host,<<"';">>]).
 
-update_vcard_version(LServer,User,Url) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"update vcard_version set version = version + 1,url = '">>, Url ,<<"' where username = '">>,User,<<"';">>]).
-
-get_vcard_version(LServer) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"select username,version,url from vcard_version;">>]).
-
-get_vcard_version_by_user(LServer,User) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"select version from vcard_version where username = '">>,User,<<"';">>]).
-
-get_muc_vcard_info(LServer) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"select muc_name,show_name,muc_desc,muc_title,muc_pic,version from muc_vcard_info;">>]).
-
-get_muc_vcard_info_by_name(LServer,Mucname) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"select show_name,muc_desc,muc_title,muc_pic,version from muc_vcard_info where muc_name = '">>,Mucname,<<"';">>]).
-
 get_user_muc_subscribe(LServer,Mucname) ->
 	ejabberd_odbc:sql_query(LServer,
 			[<<"select username from muc_room_users where muc_name = '">>,Mucname,<<"' and  subscribe_flag = '1';">>]).
+
+get_user_muc_subscribe_v2(LServer,Mucname) ->
+	ejabberd_odbc:sql_query(LServer,
+			[<<"select username,host from muc_room_users where muc_name = '">>,Mucname,<<"' and  subscribe_flag = '1';">>]).
 
 del_user_muc_subscribe(LServer,Mucname,Username) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -345,14 +388,44 @@ delete_whitelist(LServer,Username) ->
 	ejabberd_odbc:sql_query(LServer,
 			[<<"delete from white_list where username = '">>,Username,<<"';">>]).
 
-get_muc_vcard_version(LServer,Mucname) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"select show_name,muc_desc,muc_title,muc_pic,version from muc_vcard_info where muc_name = '">>,Mucname,<<"';">>]).
+del_muc_vcard_info(LServer,Mucname,Reason) ->
+    ServerHost = str:concat(<<"@conference.">>,lists:nth(1,ejabberd_config:get_myhosts())),
+	?INFO_MSG("del_muc_vcard_info Muc:[~p], Reason : [~p] ~n",[Mucname,Reason]),
+	case catch ejabberd_odbc:sql_query(LServer,[<<"select show_name from muc_vcard_info where muc_name = '">>,Mucname,<<"' or muc_name = '">>,
+					str:concat(Mucname,ServerHost),<<"';">>]) of
+	{selected, [<<"show_name">>], [[Show_name]]}  ->
+		?INFO_MSG("del_muc_vcard_info Muc:[~p], Nick : [~p] ~n",[Mucname,Show_name]),
+		catch ejabberd_odbc:sql_query(LServer,
+					[<<"insert into destroy_muc_info(muc_name,nick_name,reason) values ('">>,Mucname,<<"','">>,Show_name,<<"','">>,
+							   Reason,<<"');">>]),
+		catch ejabberd_odbc:sql_query(LServer,
+					[<<"delete from muc_vcard_info where muc_name = '">>,Mucname,<<"' or muc_name = '">>,
+								str:concat(Mucname,ServerHost),<<"';">>]);
+	Err  ->
+		?INFO_MSG("del_muc_vcard_info Muc:[~p], error : [~p] ~n",[Mucname,Err]),
+		case Reason of 
+		<<"Owner Destroy">> ->
+			catch ejabberd_odbc:sql_query(LServer,
+					[<<"delete from muc_vcard_info where muc_name = '">>,Mucname,<<"' or muc_name = '">>,
+								str:concat(Mucname,ServerHost),<<"';">>]);
+		_ ->
+			ok
+		end
+	end.
 
-del_muc_vcard_info(LServer,Mucname) ->
-	ejabberd_odbc:sql_query(LServer,
-			[<<"delete from muc_vcard_info where muc_name = '">>,Mucname,<<"' or muc_name = '">>,
-								Mucname,<<"@conference.">>,LServer,<<"';">>]).
+restore_muc_user_mark(LServer,Mucname) ->
+	Logout = integer_to_binary(mod_time:get_timestamp()),
+	case catch ejabberd_odbc:sql_query(LServer,
+			[<<"select username,login_date from muc_room_users where muc_name = '">>,Mucname,<<"';">>]) of
+	{selected, [<<"username">>,<<"login_date">>], SRes} when is_list(SRes) ->
+		lists:foreach(fun([User,Login]) ->
+			catch ejabberd_odbc:sql_query(LServer,
+				[<<"insert into muc_user_mark(muc_name,user_name,login_date,logout_date) values ('">>,Mucname,<<"','">>,
+				    User,<<"',">>,Login,<<",">>,Logout,<<");">>]) end,SRes);
+	_ ->
+		ok
+	end.
+
 
 set_muc_vcard_info(LServer,Mucname,Nick,Desc,Title,Pic) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -387,7 +460,7 @@ get_white_list_users(LServer) ->
 			    [<<"select username, single_flag from white_list">>]).
 list_users(LServer) ->
     ejabberd_odbc:sql_query(LServer,
-			    [<<"select username from users">>]).
+			    [<<"select username from users where hire_flag > 0">>]).
 
 list_users(LServer, [{from, Start}, {to, End}])
     when is_integer(Start) and is_integer(End) ->
@@ -506,14 +579,11 @@ get_roster(LServer, Username) ->
 
 get_roster_info(LServer) ->
     ejabberd_odbc:sql_query(LServer,
-                             [<<"select * from users a">>]).
+                             [<<"select * from users a where hire_flag > 0">>]).
 get_department_info(LServer) ->
     ejabberd_odbc:sql_query(LServer,
-         [<<"select dep1,dep2,dep3,dep4,dep5,username,name,department,fpinyin,spinyin from users order by dep1,dep2,dep3,dep4,dep5;">>]).
-
-get_user_suoxie(LServer) ->
-	ejabberd_odbc:sql_query(LServer,
-		[<<"select username,fpinyin,spinyin from users ;">>]).
+         [<<"select dep1,dep2,dep3,dep4,dep5,username,name,department,fpinyin,spinyin 
+		 		from users where hire_flag > 0  order by dep1,dep2,dep3,dep4,dep5;">>]).
 
 get_use_registed_muc_num(LServer,User) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -542,17 +612,48 @@ get_muc_users(LServer,Tabname,Muc_name) ->
 	ejabberd_odbc:sql_query(LServer,
 		[<<"select muc_name,username,host from ">>,Tabname,<<" where muc_name = '">>,Muc_name,<<"';">>]).
 
+del_user_register_mucs(LServer,Muc_name) ->
+	catch ejabberd_odbc:sql_query(LServer,
+        [<<"update user_register_mucs set registed_flag = 0 , created_at = now() where muc_name = '">>,Muc_name,<<"';">>]).
+%		[<<"delete from user_register_mucs  where muc_name = '">>,Muc_name,<<"';">>]).
+
+insert_user_register_mucs(LServer,User,Muc_name,Domain) ->
+    case catch ejabberd_odbc:sql_query(LServer,
+        [<<"insert into user_register_mucs(username,muc_name,domain) values ('">>,User,<<"','">>,Muc_name,<<"','">>,Domain,
+            <<"');">>]) of
+    {updated, 1} ->
+            ok;
+    _ ->
+        update_register_mucs(LServer,User,Muc_name,Domain,<<"1">>)
+    end.
+
+
+update_register_mucs(LServer,User,Muc_name,Domain,Registed_flag) ->
+    case catch ejabberd_odbc:sql_query(LServer,
+        [<<"update user_register_mucs set registed_flag = ">>,Registed_flag,<<",created_at = now() where username = '">>,User,
+            <<"' and muc_name = '">>,Muc_name,<<"' and domain = '">>,Domain,<<"';">>]) of
+        {updated, 1} ->
+            ok;
+         _ ->
+            ?INFO_MSG("update user_register_mucs user ~p ,muc ~p registed_flag ~p error",[User,Muc_name,Registed_flag])
+         end.
+
 del_muc_user(LServer,Tabname,Muc_name,Username) ->
 	ejabberd_odbc:sql_query(LServer,
 		[<<"delete from ">>,Tabname,<<" where muc_name = '">>,Muc_name,<<"' and username = '">>,Username,<<"';">>]).
 
 del_muc_users(LServer,Tabname,Muc_name) ->
+	Now = mod_time:get_timestamp(),
+	catch ejabberd_odbc:sql_query(LServer,
+			[<<"insert into muc_user_mark (muc_name,user_name,login_date,logout_date) SELECT muc_name,username,login_date,">>,
+				integer_to_binary(Now),<<" from muc_room_users where muc_name = '">>,Muc_name,<<"';">>]),
 	ejabberd_odbc:sql_query(LServer,
 		[<<"delete from ">>,Tabname,<<" where muc_name = '">>,Muc_name,<<"';">>]).
 
+
 get_user_mucs(LServer,Tabname,User) ->
 	ejabberd_odbc:sql_query(LServer,
-		[<<"select muc_name from ">>,Tabname,<<" where username = '">>,User,<<"';">>]).
+		[<<"select muc_name,host from ">>,Tabname,<<" where username = '">>,User,<<"';">>]).
 
 get_msg_info(LServer,From,To,Timestamp,Num) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -567,7 +668,7 @@ get_msg_info1(LServer,From,To,Timestamp,Num) ->
 get_msg_info2(LServer,User,Timestamp,Direction) ->
 	ejabberd_odbc:sql_query(LServer,
 			[<<"select m_from,m_to,m_body,read_flag from msg_history where (m_from = '">>,User, <<"' or m_to = '">>,User,<<"') and m_timestamp > ">>,
-				Timestamp,<<" order by m_timestamp ">>,Direction,<<";">>]).
+				integer_to_binary(Timestamp),<<" order by m_timestamp ">>,Direction,<<";">>]).
 
 get_muc_msg_info(LServer,From,Timestamp,Num) ->
 	ejabberd_odbc:sql_query(LServer,
@@ -578,6 +679,11 @@ get_muc_msg_info1(LServer,From,Timestamp,Num) ->
 	ejabberd_odbc:sql_query(LServer,
 		[<<"select muc_room_name,nick,packet from muc_room_history where muc_room_name = '">>,From,
 			 <<"' and m_timestamp < ">>,Timestamp , <<" order by m_timestamp desc limit ">>,Num,<<";">>]).
+
+get_muc_msg_info2(LServer,From,Timestamp) -> 
+	ejabberd_odbc:sql_query(LServer,
+		[<<"select muc_room_name,nick,packet from muc_room_history where muc_room_name = '">>,From,
+			 <<"' and m_timestamp > ">>,Timestamp , <<" order by m_timestamp desc; ">>]).
 
 get_last_muc_msg_time(LServer,From,Num) ->
 	ejabberd_odbc:sql_query(LServer,

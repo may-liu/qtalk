@@ -1,10 +1,3 @@
-
-%%=========================================================
-%% 		单人消息id的queue模块
-%%  维护一个queue队列，用于更新单人消息id的阅读指针
-%%=========================================================
-
-
 -module(mod_msg_id_queue).
 
 -behaviour(gen_mod).
@@ -14,10 +7,9 @@
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
-
 -export([start/2,stop/1]).
 -export([start_link/2,init/1]).
--export([add_pid/2, remove_pid/2,get_pids/1, get_random_pid/1]).
+-export([add_pid/2, remove_pid/2,get_pids/1, get_random_pid/1,get_pid_by_id/2]).
 
 -define(DEFAULT_POOL_SIZE, 20).
 
@@ -65,6 +57,12 @@ get_random_pid(Host) ->
       Pids -> lists:nth(erlang:phash(os:timestamp(), length(Pids)), Pids)
     end.
 
+get_pid_by_id(Host,ID) ->
+    case get_pids(Host) of
+    [] -> none;
+    Pids -> lists:nth(erlang:phash(ID, length(Pids)), Pids)
+    end.
+
 add_pid(Host,Pid) ->
       ets:insert(msg_id_queue_pid,{Host,Pid}).
 
@@ -72,12 +70,16 @@ remove_pid(Host,Pid) ->
       ets:delete_object(msg_id_queue_pid,{Host,Pid}).
 
 
+stop_child() ->
+    lists:foreach(fun({_,Pid}) ->
+        gen_server:cast(Pid, stop) end,ets:tab2list(msg_id_queue_pid)).
+
 stop(Host) ->
-	catch ets:delete(msg_id_queue_pid),
     Proc = get_proc_name(Host),
     supervisor:terminate_child(ejabberd_sup, Proc),
     supervisor:delete_child(ejabberd_sup, Proc),
-    ok.
+    stop_child(),
+	catch ets:delete(msg_id_queue_pid).
 
 get_proc_name(Host) ->
     gen_mod:get_module_proc(Host, ?PROCNAME).

@@ -18,38 +18,27 @@
 
 
 
+
+
 CREATE TABLE users
 (
- username text NOT NULL,
- password text NOT NULL,
- created_at timestamp without time zone NOT NULL DEFAULT now(),
- name text,
- department text DEFAULT '鏈煡閮ㄩ棬'::text,
- dep1 text DEFAULT '鏈煡閮ㄩ棬'::text,
- dep2 text DEFAULT ''::text,
- dep3 text DEFAULT ''::text,
- dep4 text DEFAULT ''::text,
- dep5 text DEFAULT ''::text,
- fpinyin text,
- spinyin text,
- frozen_flag text DEFAULT '0'::text,
- sn text NOT NULL,
- hire_type text,
- version integer DEFAULT 0,
- type character(1),
- hire_flag smallint,
- CONSTRAINT users_pkey PRIMARY KEY (username)
+  username text NOT NULL,
+  password text NOT NULL,
+  created_at timestamp without time zone NOT NULL DEFAULT now(),
+  name text,
+  department text DEFAULT '未知部门'::text,
+  dep1 text DEFAULT '未知部门'::text,
+  dep2 text DEFAULT ''::text,
+  dep3 text DEFAULT ''::text,
+  dep4 text DEFAULT ''::text,
+  dep5 text DEFAULT ''::text,
+  fpinyin text,
+  spinyin text,
+  CONSTRAINT users_pkey PRIMARY KEY (username)
 );
--- Index: i_user_version
-
--- DROP INDEX i_user_version;
-
-CREATE INDEX i_user_version
-ON users
-USING btree
-(version);
-
-
+CREATE INDEX i_users_dep1 ON users USING btree (dep1);
+CREATE INDEX i_users_dep2 ON users USING btree (dep2);
+CREATE INDEX i_users_dep3 ON users USING btree (dep3);
 
 CREATE TABLE last (
     username text PRIMARY KEY,
@@ -101,32 +90,14 @@ CREATE INDEX i_sr_user_jid ON sr_user USING btree (jid);
 CREATE INDEX i_sr_user_grp ON sr_user USING btree (grp);
 
 CREATE TABLE spool (
-	username text NOT NULL,
-	xml text NOT NULL,
-	seq integer NOT NULL,
-	created_at timestamp without time zone DEFAULT now() NOT NULL,
-	send_flag text DEFAULT '1'::text,
-	from_username text DEFAULT '鏈煡'::text NOT NULL,
-	notice_flag text DEFAULT '0'::text,
-	away_flag text DEFAULT '0'::text
-	);
-
-CREATE SEQUENCE spool_seq_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE spool_seq_seq OWNED BY spool.seq;
-
-ALTER TABLE ONLY spool
-    ADD CONSTRAINT spool_pkey PRIMARY KEY (seq);
-
+    username text NOT NULL,
+    xml text NOT NULL,
+    seq SERIAL,
+    created_at TIMESTAMP NOT NULL DEFAULT now(),
+    send_flag text NOT NULL DEFAULT '1'::text
+);
 
 CREATE INDEX i_despool ON spool USING btree (username);
-CREATE INDEX spool_crated_at_idx ON spool USING btree (created_at);
-CREATE INDEX spool_send_flag_idx ON spool USING btree (send_flag);
 
 
 CREATE TABLE vcard (
@@ -346,245 +317,70 @@ CREATE TABLE day_online_time
   CONSTRAINT day_online_time_pkey PRIMARY KEY (username, date_time)
 );
 
-CREATE TABLE iplimit
-(
- ip text NOT NULL,
- created_at timestamp(6) without time zone NOT NULL DEFAULT now(),
- descriptions text NOT NULL DEFAULT now(),
- priority text NOT NULL DEFAULT '1'::text,
- name text NOT NULL DEFAULT 'all'::text,
- CONSTRAINT pk_iplimit PRIMARY KEY (ip, name, priority)
- );
 
-
--- Table: msg_history
-
--- DROP TABLE msg_history;
 
 CREATE TABLE msg_history
 (
- m_from character varying(255),
- m_to character varying(255),
- m_body text,
- m_timestamp integer DEFAULT date_part('epoch'::text, now()),
- msg_id text,
- read_flag integer DEFAULT 0,
- to_host text DEFAULT 'ejabberd_host'::text,
- from_host text DEFAULT 'ejabberd_host'::text
- );
-
--- Index: i_from_host_idx
-
--- DROP INDEX i_from_host_idx;
-
-CREATE INDEX i_from_host_idx ON msg_history USING btree (from_host);
-
--- Index: i_msg_from_fhost_to_thost_timestamp
-
--- DROP INDEX i_msg_from_fhost_to_thost_timestamp;
-
-CREATE INDEX i_msg_from_fhost_to_thost_timestamp_idx ON msg_history USING btree (m_from, m_to, m_timestamp, from_host, to_host);
-
-CREATE INDEX i_msg_history_m_timestamp_m_from_m_to_idx ON msg_history USING btree (m_timestamp, m_from, m_to);
-
-CREATE INDEX i_msg_history_from_host_to_host_idx ON msg_history USING btree (from_host, to_host);
-
-CREATE INDEX i_msg_history_msg_id_idx1 ON msg_history USING btree (msg_id);
-
-CREATE TABLE muc_room_history (
-	muc_room_name character varying(255),
-	nick character varying(255),
-	packet text,
-	have_subject boolean,
-	size character varying(255),
-	m_timestamp integer DEFAULT date_part('epoch'::text, now()),
-	create_time timestamp with time zone DEFAULT now(),
-	id bigint NOT NULL,
-	host text DEFAULT 'ejabberd_host'::text
+  m_from character varying(255) NOT NULL,
+  m_to character varying(255) NOT NULL,
+  m_body text,
+  m_timestamp integer DEFAULT date_part('epoch'::text, now())
 );
 
-CREATE SEQUENCE muc_room_history_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
+CREATE UNIQUE INDEX i_msg_history_tuple ON msg_history USING btree (m_from, m_to,m_timestamp);
 
-ALTER SEQUENCE muc_room_history_id_seq OWNED BY muc_room_history.id;
-
-ALTER TABLE ONLY muc_room_history
-    ADD CONSTRAINT muc_room_history_pkey PRIMARY KEY (id);
-
-
-CREATE INDEX muc_room_history_muc_room_name_idx ON muc_room_history USING btree (muc_room_name);
-CREATE INDEX muc_room_history_nick_idx ON muc_room_history USING btree (nick);
-CREATE INDEX muc_room_history_room_name_m_t_idx ON muc_room_history USING btree (muc_room_name, m_timestamp);
-
-CREATE TABLE muc_room_users (
-	muc_name character varying(200) NOT NULL,
-	username character varying(200) NOT NULL,
-	host character varying(200) NOT NULL,
-	subscribe_flag text DEFAULT '0'::text NOT NULL,
-	id bigint NOT NULL,
-	date bigint,
-	login_date integer
-);
-
-CREATE SEQUENCE muc_room_users_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE muc_room_users_id_seq OWNED BY muc_room_users.id;
-
-
-ALTER TABLE ONLY muc_room_users
-    ADD CONSTRAINT muc_room_users_pkey PRIMARY KEY (id);
-
-CREATE UNIQUE INDEX muc_room_users_muc_name_username_idx ON muc_room_users USING btree (muc_name, username);
-
-CREATE TABLE muc_spool (
-	username text NOT NULL,
-	xml text NOT NULL,
-	seq integer NOT NULL,
-	created_at timestamp without time zone DEFAULT now() NOT NULL,
-	send_flag text DEFAULT '1'::text,
-	from_username text DEFAULT '鏈煡'::text NOT NULL,
-	nick text
-);
-
-CREATE SEQUENCE muc_spool_seq_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE muc_spool_seq_seq OWNED BY muc_spool.seq;
-
-ALTER TABLE ONLY muc_spool
-    ADD CONSTRAINT muc_spool_pkey PRIMARY KEY (seq);
-
-CREATE INDEX muc_spool_creaetd_at_idx ON muc_spool USING btree (created_at);
-
-CREATE INDEX muc_spool_username_idx ON muc_spool USING btree (username);
-
-CREATE TABLE muc_vcard_info (
-	muc_name text NOT NULL,
-	show_name text NOT NULL,
-	muc_desc text,
-	muc_title text,
-	muc_pic text,
-	version text
-);
-
-ALTER TABLE ONLY muc_vcard_info
-    ADD CONSTRAINT muc_vcard_info_pkey PRIMARY KEY (muc_name);
-
-CREATE TABLE robot_info (
-	en_name text NOT NULL,
-	cn_name text NOT NULL,
-	request_url text NOT NULL,
-	rbt_desc text,
-	rbt_body text NOT NULL,
-	rbt_version bigint,
-	password text,
-	recommend smallint
-);
-
-ALTER TABLE ONLY robot_info
-    ADD CONSTRAINT robot_info_pkey PRIMARY KEY (en_name);
-
-CREATE TABLE robot_pubsub (
-    rbt_name text NOT NULL,
-    user_name text NOT NULL
+CREATE TABLE muc_last
+(
+  muc_name text NOT NULL,
+  create_time text,
+  last_msg_time text DEFAULT '0'::text,
+  CONSTRAINT muc_last_pkey PRIMARY KEY (muc_name)
 );
 
 
-ALTER TABLE ONLY robot_pubsub
-    ADD CONSTRAINT robot_pubsub_pkey PRIMARY KEY (rbt_name, user_name);
+CREATE INDEX i_muc_last_mname ON muc_last USING btree (muc_name);
 
 
-CREATE TABLE user_mac_key (
-	user_name character varying(255) NOT NULL,
-	host character varying(255) NOT NULL,
-	mac_key character varying(255),
-	os text DEFAULT 'ios'::text NOT NULL,
-	version text,
-	push_flag integer DEFAULT 0 NOT NULL
+CREATE TABLE muc_room_history
+(
+  muc_room_name character varying(255),
+  nick character varying(255),
+  packet text,
+  have_subject boolean,
+  size character varying(255),
+  m_timestamp integer DEFAULT date_part('epoch'::text, now())
 );
 
-ALTER TABLE ONLY user_mac_key
-    ADD CONSTRAINT user_mac_key_pkey PRIMARY KEY (user_name, host, os);
+CREATE UNIQUE INDEX i_muc_room_history_tuple ON muc_room_history USING btree (muc_room_name, m_timestamp);
 
-CREATE INDEX uer_mac_key_user_name_idx ON user_mac_key USING btree (user_name);
 
-CREATE TABLE vcard_version (
-	username text NOT NULL,
-	version integer,
-	url text,
-	uin character varying(30),
-	id bigint NOT NULL,
-	profile_version smallint DEFAULT (1)::smallint,
-	mood text
+CREATE TABLE muc_room_users
+(
+  muc_name character varying(200) NOT NULL,
+  username character varying(200) NOT NULL,
+  host character varying(200) NOT NULL,
+  CONSTRAINT muc_room_users_pkey PRIMARY KEY (muc_name, username)
 );
 
-CREATE SEQUENCE vcard_version_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
 
-ALTER SEQUENCE vcard_version_id_seq OWNED BY vcard_version.id;
+CREATE INDEX i_muc_room_users_m_name ON muc_room_users USING btree (muc_name);
+CREATE UNIQUE INDEX i_muc_room_users_tuple ON muc_room_users USING btree (muc_name, username);
 
-ALTER TABLE ONLY vcard_version
-    ADD CONSTRAINT vcard_version_pkey PRIMARY KEY (id);
-
-CREATE UNIQUE INDEX vcard_version_username_idx ON vcard_version USING btree (username);
-
-
-
-
-CREATE TABLE white_list (
-    username text NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    single_flag text DEFAULT '1'::text
+CREATE TABLE vcard_version
+(
+  username text NOT NULL,
+  version integer,
+  CONSTRAINT vcard_version_pkey PRIMARY KEY (username)
 );
 
-ALTER TABLE ONLY white_list
-    ADD CONSTRAINT white_list_pkey PRIMARY KEY (username);
+CREATE INDEX i_vcard_version_u_name ON vcard_version USING btree (username);
+
+CREATE TABLE user_mac_key
+(
+  user_name character varying(255) NOT NULL,
+  host character varying(255) NOT NULL,
+  mac_key character varying(255),
+  CONSTRAINT user_mac_key_pkey PRIMARY KEY (user_name, host)
+);
 
 
-ALTER TABLE ONLY muc_room_history ALTER COLUMN id SET DEFAULT nextval('muc_room_history_id_seq'::regclass);
-ALTER TABLE ONLY muc_spool ALTER COLUMN seq SET DEFAULT nextval('muc_spool_seq_seq'::regclass);
-ALTER TABLE ONLY muc_room_users ALTER COLUMN id SET DEFAULT nextval('muc_room_users_id_seq'::regclass);
-ALTER TABLE ONLY vcard_version ALTER COLUMN id SET DEFAULT nextval('vcard_version_id_seq'::regclass);
-
-CREATE FUNCTION spilt_users_to_insert_xml(users text, muc_name text, nick text, msg text) RETURNS integer
-    LANGUAGE plpgsql
-    AS $$
-  declare cnt int;
-  declare i int;
-  declare v_result text;
-  declare f_delimiter varchar(10);
-  declare ret_sql text;
-  begin
-      i := 1;
-      f_delimiter := ',';
-      ret_sql := '';
-      cnt := length(users) - length(replace(users,f_delimiter,''))+1;
-      while i <= cnt
-     loop
-        v_result := split_part(users,f_delimiter,i);
-        i := i + 1;
-        ret_sql := 'insert into muc_spool(username,xml,from_username,nick) values(''' || v_result || ''',' || quote_literal(msg) || ',''' || muc_name || ''',''' || nick|| ''')';
-	execute ret_sql;
-     end loop;
-  return 1;
-  EXCEPTION  
-	when others then  
-	return 0 ; 
-  end;

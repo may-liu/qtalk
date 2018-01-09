@@ -1,0 +1,12 @@
+% -*- mode: erlang -*-
+{application, ejb_http_server,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, [ejb_http_server]},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, {ejb_http_server_app,[]}},
+  {env, []}]}.

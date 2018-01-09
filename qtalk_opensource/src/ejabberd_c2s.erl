@@ -64,8 +64,11 @@
 	 code_change/4,
 	 handle_info/3,
 	 terminate/3,
+	 kick_lower_version_user/2,
 	 print_state/1
      ]).
+
+-export([add_body_id/2]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -117,10 +120,11 @@
 		mgmt_resend,
 		mgmt_stanzas_in = 0,
 		mgmt_stanzas_out = 0,
-		mac_key = <<"">>,
+		key_flag = false,
 		lang = <<"">>}).
 
 %-define(DBGFSM, true).
+-record(session, {sid, usr, us, priority, info,show}).
 
 -ifdef(DBGFSM).
 
@@ -408,11 +412,8 @@ wait_for_stream({xmlstreamstart, _Name, Attrs}, StateData) ->
 							     children = [{xmlcdata, S}]}
 					      end,
 					     [<<"PLAIN">>]),
-					    %%----------------------------------------------------------------------------
-					    %%cyrsasl:listmech(Server)),
-						%%因为我们的客户端加密使用rsa加密方式，此处传输不能使用md5加密，默认使用明文传送
-						%%如需要根据客户端加密修改请注释掉[<<"PLAIN">>]),使用cyrsasl:listmech(Server))
-						%%-----------------------------------------------------------------------------
+					    %% cyrsasl:listmech(Server)),
+		
 				    SockMod =
 					(StateData#state.sockmod):get_sockmod(
 					  StateData#state.socket),
@@ -1051,14 +1052,20 @@ wait_for_bind({xmlstreamelement, El}, StateData) ->
 							  children =
 							      [{xmlcdata,
 								jlib:jid_to_string(JID)}]}]}]},
-		      send_element(StateData, jlib:iq_to_xml(Res)),
-			  %%---------------------------
-			  %%设置用户http接口验证key值
-			  %%---------------------------
-			  Key = iolist_to_binary([ integer_to_binary(random:uniform(65536)) | [jlib:integer_to_binary(X)|| X <- tuple_to_list(os:timestamp())]]),			   ejabberd_public:set_redis_user_key(StateData#state.server,U,R2,Key,R2,86400*3),
-
-		      fsm_next_state(wait_for_session,
-				     StateData#state{resource = R2, jid = JID})
+			  	
+			  case check_lower_version(R2,1010) of
+			  false ->
+			  	?INFO_MSG("Too lower version,forbid login ~p ~n",[JID#jid.luser]),
+				send_trailer(StateData),
+    			{stop, normal, StateData};
+			  _ ->
+		      	send_element(StateData, jlib:iq_to_xml(Res)),
+			  	Key = iolist_to_binary(
+						[ integer_to_binary(random:uniform(65536)) | [jlib:integer_to_binary(X)|| X <- tuple_to_list(os:timestamp())]]),	
+              	ejabberd_public:set_redis_user_key(StateData#state.server,U,R2,Key,R2,86400*3),
+		      	fsm_next_state(wait_for_session,
+					     StateData#state{resource = R2, jid = JID})
+			  end
 		end
 	  end;
       _ -> fsm_next_state(wait_for_bind, StateData)
@@ -1109,8 +1116,11 @@ wait_for_session({xmlstreamelement, El}, StateData) ->
 		    Conn = get_conn_type(NewState),
 		    Info = [{ip, NewState#state.ip}, {conn, Conn},
 			    {auth_module, NewState#state.auth_module}],
-			catch mod_monitor:count_user_login_in(NewState#state.server,U,0),
-			catch mod_monitor:monitor_count(NewState#state.server,<<"user_lan_login">>,1,0),
+%%			catch mod_monitor:count_user_login_in(NewState#state.server,U,0),
+			catch mod_monitor:monitor_count(NewState#state.server,<<"user_login">>,1),
+			catch mod_monitor:monitor_count(NewState#state.server,<<"user_lan_login">>,1),
+			
+
 		    ejabberd_sm:open_session(
 		      NewState#state.sid, U, NewState#state.server, R, Info),
                     UpdatedStateData =
@@ -1153,14 +1163,22 @@ session_established({xmlstreamelement, #xmlel{name = Name} = El}, StateData)
 session_established({xmlstreamelement, El},
 		    StateData) ->
     FromJID = StateData#state.jid,
+	Resource = FromJID#jid.resource,
+	User = FromJID#jid.user,
+	LServer = jlib:nameprep(FromJID#jid.server),
+	NewStateData =
+		send_time_key_presence(LServer,User,Resource,StateData),	
+				
     case check_from(El, FromJID) of
 	'invalid-from' ->
 	    send_element(StateData, ?INVALID_FROM),
 	    send_trailer(StateData),
-	    {stop, normal, StateData};
+%%	    {stop, normal, StateData};
+	    {stop, normal, NewStateData};
 	_NewEl ->
 %		session_established2 msg in this
-	    session_established2(El, StateData)
+%%	    session_established2(El, StateData)
+	    session_established2(El, NewStateData)
     end;
 %% We hibernate the process to reduce memory consumption after a
 %% configurable activity timeout
@@ -1226,9 +1244,18 @@ session_established2(El, StateData) ->
 		     case Name of
 		       <<"presence">> ->
 			   PresenceEl =
-			       ejabberd_hooks:run_fold(c2s_update_presence,
-						       Server, NewEl,
-						       [User, Server]),
+			   	   case catch xml:get_attr_s(<<"xmlns">>, Attrs) of 
+				   ?NS_VER_FRI ->
+				   		El;
+			       ?NS_MUC_INVITE ->
+		               El;
+		           ?NS_MUC_DEL_REGISTER->
+				   	   El;
+					_ ->
+			       		ejabberd_hooks:run_fold(c2s_update_presence,
+							       Server, NewEl,
+							       [User, Server])
+					end,
 			   ejabberd_hooks:run(user_send_packet, Server,
 					      [FromJID, ToJID, PresenceEl]),
 			   case ToJID of
@@ -1258,11 +1285,16 @@ session_established2(El, StateData) ->
 			   end;
 		       <<"message">> ->
 			   NewPacket = do_sent_repley(NewEl,FromJID,NewStateData),
-			   	?DEBUG("Packet ~p ~n",[NewPacket]),
 			   ejabberd_hooks:run(user_send_packet, Server,
 					      [FromJID, ToJID, NewPacket]),
-			   catch  check_privacy_route(FromJID, NewStateData, FromJID,
-					       ToJID, NewEl) ,
+			%%		      [FromJID, ToJID, NewEl]),
+			   case check_privacy_route(FromJID, NewStateData, FromJID,
+					       ToJID, NewPacket) of
+			   deny ->
+			   		ok;
+				_ ->
+					carbon_message(FromJID,ToJID,NewPacket)
+			    end,
 			   NewStateData;
 		       _ -> NewStateData
 		     end
@@ -1364,7 +1396,8 @@ handle_info(kick, StateName, StateData) ->
     Xmlelement = ?SERRT_POLICY_VIOLATION(Lang, <<"has been kicked">>),
     handle_info({kick, kicked_by_admin, Xmlelement}, StateName, StateData);
 handle_info({kick, Reason, Xmlelement}, _StateName, StateData) ->
-    send_element(StateData, Xmlelement),
+    ?INFO_MSG("Xmlelement ~p ~n",[Xmlelement]),
+ %$   send_element(StateData, Xmlelement),
     send_trailer(StateData),
     {stop, normal,
      StateData#state{authenticated = Reason}};
@@ -1502,6 +1535,17 @@ handle_info({route, From, To,
 								     Packet,
 								     in),
 					     {SRes, Attrs, State};
+	  				<<"update_pres_a">> ->
+	  					NState = 
+							case xml:get_attr_s(<<"muc_name">>, Attrs) of
+							<<"">> ->
+								State;
+							Muc_name ->
+								Domain = xml:get_attr_s(<<"muc_domain">>, Attrs),
+								Nick = xml:get_attr_s(<<"muc_nick">>, Attrs),
+	  							update_user_pres_a({Muc_name,Domain,Nick},State)
+							end,
+						{false, Attrs, NState};
 					 _ ->
 					     case privacy_check_packet(State,
 								       From, To,
@@ -1718,6 +1762,20 @@ handle_info({broadcast, Type, From, Packet}, StateName, StateData) ->
 		From, jlib:make_jid(USR), Packet)
       end, lists:usort(Recipients)),
     fsm_next_state(StateName, StateData);
+handle_info({update_presence_a,Muc}, StateName, StateData) ->
+	Jid_muc = jlib:jid_tolower(Muc),
+   	A1 =  remove_element(Jid_muc, StateData#state.pres_a),
+	A2 = (?SETS):add_element(Jid_muc, A1),
+	NewStateData =	StateData#state{pres_a =  A2},
+    fsm_next_state(StateName, NewStateData);
+handle_info({remove_presence_a,Muc}, StateName, StateData) ->
+	Jid_muc = jlib:jid_tolower(Muc),
+   	A =  remove_element(Jid_muc, StateData#state.pres_a),
+	NewStateData =	StateData#state{pres_a =  A},
+    fsm_next_state(StateName, NewStateData);
+handle_info(print_presence_a, StateName, StateData) ->
+	?DEBUG("state pres_a ~p ~n",[StateData#state.pres_a]),
+	fsm_next_state(StateName, StateData);
 handle_info(Info, StateName, StateData) ->
     ?ERROR_MSG("Unexpected info: ~p", [Info]),
     fsm_next_state(StateName, StateData).
@@ -1775,7 +1833,7 @@ terminate(Reason, StateName, StateData) ->
 		       ?INFO_MSG("(~w) Close session for ~s,Reason ~p ",
 				 [StateData#state.socket,
 				  jlib:jid_to_string(StateData#state.jid),Reason]),
-               catch mod_monitor:monitor_count(StateData#state.server,<<"close_session">>,1,0),
+               catch mod_monitor:monitor_count(StateData#state.server,<<"close_session">>,1),
 		       EmptySet = (?SETS):new(),
 		       case StateData of
 			 #state{pres_last = undefined,
@@ -1808,9 +1866,6 @@ terminate(Reason, StateName, StateData) ->
 		 ok
 	  end
     end,
-	%%-----------------------------
-	%%用户登陆清理key值
-	%%-----------------------------
     ejabberd_public:clear_redis_user_key(StateData#state.server,StateData#state.user,StateData#state.resource),
     (StateData#state.sockmod):close(StateData#state.socket),
     ok.
@@ -1840,7 +1895,13 @@ send_text(StateData, Text) when StateData#state.mgmt_state == active ->
 	  ok
     end;
 send_text(StateData, Text) ->
-	?DEBUG("[Send XML on stream] ~s, ~p ", [Text,StateData#state.socket]),
+%%	case judge_log_to_write(Text) of
+%%	true ->
+%%		?INFO_MSG("[Send XML on stream] ~s, ~p ", [Text,StateData#state.socket]);
+%%	_ ->
+		?DEBUG("[Send XML on stream] ~s, ~p ", [Text,StateData#state.socket]),
+%%		ok
+%%	end,
     (StateData#state.sockmod):send(StateData#state.socket, Text).
 
 send_element(StateData, El) when StateData#state.mgmt_state == pending ->
@@ -1849,6 +1910,7 @@ send_element(StateData, El) when StateData#state.xml_socket ->
     (StateData#state.sockmod):send_xml(StateData#state.socket,
 				       {xmlstreamelement, El});
 send_element(StateData, El) ->
+    catch mod_monitor:monitor_count(StateData#state.server,<<"lan_user_send_msg">>,1),
     send_text(StateData, xml:element_to_binary(El)).
 
 send_stanza(StateData, Stanza) when StateData#state.mgmt_state == pending ->
@@ -2126,10 +2188,46 @@ presence_track(From, To, Packet, StateData) ->
       <<"probe">> ->
 	  check_privacy_route(From, StateData, From, To, Packet),
 	  StateData;
+      <<"verify_friend">> ->
+	  NewPacket = make_new_presence_packet(StateData#state.server,From,Packet,Attrs),
+	  check_privacy_route(From, StateData, From, To, NewPacket),
+	  StateData;
+      <<"manual_authentication_confirm">> ->
+	  NewPacket = make_new_presence_packet(StateData#state.server,From,Packet,Attrs),
+	  check_privacy_route(From, StateData, From, To, NewPacket),
+	  StateData;
       _ ->
 	  check_privacy_route(From, StateData, From, To, Packet),
-	  A = (?SETS):add_element(LTo, StateData#state.pres_a),
-	  StateData#state{pres_a = A}
+	  New_pres_a = 
+	  	case  jlib:jid_tolower(To) of
+	  	{<<"">>,_,<<"">>} ->
+			Nick = 	ejabberd_public:get_user_nick(From#jid.user),
+			Muc_pres_a = 
+				case catch ejabberd_odbc:sql_query(From#jid.lserver,
+                	[<<"select muc_name,domain from user_register_mucs where username = '">>,From#jid.user,
+                <<"' and registed_flag = 1;">>]) of 
+				{selected,[<<"muc_name">>,<<"domain">>], SRes}   when is_list(SRes) ->
+			   		lists:flatmap(fun([M,D]) ->
+					 	case jlib:jid_tolower({M,D,Nick}) of  
+						error ->
+							[];
+						Muc_To ->
+							case catch (?SETS):is_element(Muc_To, StateData#state.pres_a) of
+							true ->
+								[];
+							_ ->
+								[Muc_To]
+							end
+						end end,SRes);
+				_ ->
+					[]
+				end,
+			Set_Muc_pres_a = (?SETS):from_list(Muc_pres_a),
+			(?SETS):union(Set_Muc_pres_a,StateData#state.pres_a);
+		_ ->		
+	  		(?SETS):add_element(LTo, StateData#state.pres_a)
+		end,
+	 StateData#state{pres_a = New_pres_a}
     end.
 
 check_privacy_route(From, StateData, FromRoute, To,
@@ -2146,8 +2244,7 @@ check_privacy_route(From, StateData, FromRoute, To,
 	  	ejabberd_router:route(To, From, Err),
 	  	deny;
       allow -> 
-%		route msg in this
-		ejabberd_router:route(FromRoute, To, Packet)
+			ejabberd_router:route(From, To, Packet)
     end.
 
 %% Check if privacy rules allow this delivery
@@ -2373,7 +2470,8 @@ resend_offline_messages(StateData) ->
 					 deny -> false
 				       end,
 				if Pass ->
-				       ejabberd_router:route(From, To, Packet);
+				 %      ejabberd_router:route(From, To, Packet);
+                        ok;
 				   true -> ok
 				end
 			end,
@@ -2520,7 +2618,7 @@ check_from(El, FromJID) ->
 			(JID#jid.lresource == <<"">>) ->
 			    El;
 			true ->
-			    'invalid-from'
+                'invalid-from'
 		    end
 	    end
     end.
@@ -3023,23 +3121,18 @@ pack_string(String, Pack) ->
 transform_listen_option(Opt, Opts) ->
     [Opt|Opts].
 
-%%---------------------------------------------
-%%记录用户状态(away,normal)到用户的mnesia表中
-%%---------------------------------------------
 record_user_show_tag(Packet,StateData) ->
-	case get_presence_show_tag(Packet) of
+	case catch get_presence_show_tag(Packet) of
 	<<"normal">> ->
-	    ejabberd_sm:record_show(StateData#state.user, 
-				StateData#state.server,StateData#state.resource,<<"normal">>);
+	   ejabberd_sm:record_show(StateData#state.user, 
+			StateData#state.server,StateData#state.resource,<<"normal">>);
 	<<"away">> ->
-		ejabberd_sm:record_show(StateData#state.user, 
-				StateData#state.server,StateData#state.resource,<<"away">>);
-	 _ ->
-	   	ok
-	 end.
-%%---------------------------------------------
-%%获取用户状态(away,normal)
-%%---------------------------------------------
+	   ejabberd_sm:record_show(StateData#state.user, 
+			StateData#state.server,StateData#state.resource,<<"away">>);
+	_ ->
+	 		ok
+	end.
+
 get_presence_show_tag(Presence) ->
     case xml:get_path_s(Presence, [{elem, <<"show">>}, cdata]) of
 	<<"away">> -> <<"away">>;
@@ -3047,32 +3140,47 @@ get_presence_show_tag(Presence) ->
 	_ -> <<"unknown">>
     end.
 
-
-%%-------------------------------------------------
-%%客户端发送message类型消息是否发送到服务器后的回复
-%%-------------------------------------------------
-do_sent_repley(El,FromJID,StateData) ->
-    case catch xml:get_subtag_cdata(El, <<"body">>) of
-    <<>> ->
-        El;
-    _ ->
-		case catch xml:get_tag_attr_s(<<"id">>,xml:get_subtag(El,<<"body">>)) of
-		<<"">> ->
-			Bid = list_to_binary("add" ++ integer_to_list(mod_time:get_exact_timestamp())),
-			ReEls = ejabberd_public:make_sent_packet(FromJID,Bid),
-			send_element(StateData, ReEls),
-			add_body_attr_id(El,Bid);
-        ID ->
-		    ReEls = ejabberd_public:make_sent_packet(FromJID,ID),
-			send_element(StateData, ReEls),
-			El
+judge_log_to_write(Text) ->
+	case str:str(Text,<<"message">>) of
+	0 ->
+		true;
+	_ ->
+		case str:str(Text,<<"body">>) =/=0 andalso (str:str(Text,<<"chat">>) =/=0 orelse str:str(Text,<<"groupchat">>) =/=0) of
+		true ->
+			true;
+		false ->
+			false
 		end
 	end.
 
-%%-------------------------------------------
-%%在body属性页添加id,该id用于标记使用已读未读
-%%-------------------------------------------
-add_body_attr_id(Packet,ID) ->
+
+do_sent_repley(El,FromJID,StateData) ->
+	case catch xml:get_subtag_cdata(El, <<"body">>) of
+	<<>> -> 
+		El;
+	_ ->
+		Type = xml:get_tag_attr_s(<<"type">>, El),
+		case Type =:= <<"readmark">> orelse Type =:= <<"error">> orelse Type =:= <<"headline">> orelse 
+				Type =:= <<"subscription">> of 
+		true ->
+			El;
+		_ ->
+			case catch xml:get_tag_attr_s(<<"id">>,xml:get_subtag(El,<<"body">>)) of
+			<<"">> ->
+               % Bid = list_to_binary("addo_" ++ uuid:to_string(uuid:random())),
+                 Bid = list_to_binary("add_" ++ integer_to_list(random:uniform(65536)) ++ integer_to_list(mod_time:get_exact_timestamp())),
+				ReEls = ejabberd_public:make_sent_packet(FromJID,Bid),
+				send_element(StateData, ReEls),
+				add_body_id(El,Bid);
+			ID ->
+				ReEls = ejabberd_public:make_sent_packet(FromJID,ID),
+				send_element(StateData, ReEls),
+				El
+			end
+		end
+	end.
+
+add_body_id(Packet,ID) ->
 	ID_Packet = xml:replace_tag_attr(<<"id">>,ID,xml:get_subtag(Packet,<<"body">>)),
 	case catch xml:remove_subtags_by_name(Packet,<<"body">>) of
 	Body when is_record(Body,xmlel) ->
@@ -3081,3 +3189,183 @@ add_body_attr_id(Packet,ID) ->
 		Packet
 	end.
 
+make_time_key_presence(Key) ->
+	Time = integer_to_binary(mod_time:get_timestamp()),
+	#xmlel{name = <<"presence">>,
+	   	attrs = [{<<"xmlns">>,?CONFIG_XMPP_TIME_KEY},{<<"time_value">>,Time},{<<"key_value">>,Key}],
+	   	children = []}.
+
+send_time_key_presence(LServer,User,Resource,StateData) ->
+	case  StateData#state.key_flag of 
+	false ->
+		Key =
+			case redis_link:hash_get(LServer,1,User,Resource) of
+			{ok,undefined} ->
+				<<"">>;
+			{ok,K} ->
+				K;
+			_ ->
+				<<"">>
+			end,
+		State = 
+			case Key of
+			<<"">> ->
+			%	send_trailer(StateData),
+				StateData#state{key_flag = false};
+			_ ->
+		        Presence = make_time_key_presence(Key),
+        		send_element(StateData,Presence),
+				StateData#state{key_flag = true}
+			end,
+%%		join_live_muc(State);
+		State;
+	_ ->
+		StateData
+	end.
+
+send_user_refused_msg(StateData,From,To,_Packet) ->
+	send_element(StateData, make_recv_reply_packet(From,To)).
+		
+make_recv_reply_packet(From,To) ->
+   xml:to_xmlel(
+		{xmlel ,<<"message">>, [{<<"type">>,<<"reply">>},{<<"to">>,jlib:jid_to_string(From)},{<<"receiver">>,jlib:jid_to_string(To)}],
+		             [{xmlel,<<"body">>,[{<<"reply">>,<<"refused">>}],[]}]}).
+
+make_new_presence_packet(LServer,From,Packet,_Attrs) ->
+	Num = mod_user_relation:get_users_friend_num(LServer,From#jid.luser),
+	xml:replace_tag_attr(<<"friend_num">>,http_utils:to_binary(Num,<<"0">>), Packet).
+
+carbon_message(From,To,Packet) ->
+	case ejabberd_sm:get_user_resources(From#jid.user,From#jid.server) of
+	Resoureces  when is_list(Resoureces) ->
+		case length(Resoureces) of
+		0 ->
+			ok;
+		1 ->
+			ok;
+		_ ->
+			#xmlel{name = Name, attrs = Attrs, children = Els} = Packet,
+            Type = xml:get_attr_s(<<"type">>, Attrs),
+            if Type == <<"normal">> ; Type == <<"chat">>; Type == <<"revoke">>; Type == <<"note">> ->
+				case str:str(To#jid.server,<<"conference">>) =:= 0 andalso xml:get_attr_s(<<"auto_reply">>, Attrs) =/= <<"true">> of 
+				true ->
+					lists:foreach(fun(Resource) ->
+						if Resource =:= From#jid.resource ->
+							ok;
+						true ->
+							NewFrom = jlib:make_jid(From#jid.user,From#jid.server, Resource),
+							case NewFrom of 
+							error ->
+							ok;
+							_ ->
+								Attrs2 = jlib:replace_from_to_attrs(jlib:jid_to_string(NewFrom),jlib:jid_to_string(To), Attrs),
+								Attrs3 = lists:append([Attrs2,[{<<"carbon_message">>,<<"true">>}]]),
+								NewPacket = #xmlel{name = Name, attrs = Attrs3,	children = Els },
+								ejabberd_router:route(To, NewFrom, NewPacket)
+							end
+						 end
+				  	end,Resoureces);
+				_ ->
+					ok
+				end;
+			true ->
+				ok
+			end
+		end;
+	_ ->
+		ok
+	end.
+
+join_live_muc(State) ->
+	Conf_Server = str:concat(<<"conference.">> ,State#state.server),
+    Nick =  ejabberd_public:get_user_nick(State#state.user),
+	case catch ejabberd_odbc:sql_query(State#state.server,
+		[<<"select muc_name,domain from user_register_mucs where username = '">>,State#state.user,
+            <<"' and registed_flag = 1;">>]) of
+	{selected,[<<"muc_name">>,<<"domain">>], SRes}   when is_list(SRes) ->
+		Presence_packet = 
+			#xmlel{name = <<"presence">>,
+				attrs = [{<<"priority">>,<<"5">>},{<<"version">>,<<"2">>}],
+					children = [
+						#xmlel{name = <<"x">>,
+						 attrs =[{<<"xmlns">>,
+							?NS_MUC}],
+						 children = []}
+						]},
+		lists:foldl(fun([M,D],Acc) ->
+			if Conf_Server =:= D ->
+				case mnesia:dirty_read(muc_online_room, {M, D}) of
+				[] ->
+					Acc;
+				_ ->
+					send_join_muc_presence(State#state.jid,Nick,M,D,Presence_packet),
+					update_user_pres_a({M,D,Nick},Acc)
+				end;
+			true ->
+				send_join_muc_presence(State#state.jid,Nick,M,D,Presence_packet),
+				update_user_pres_a({M,D,Nick},Acc)
+
+			end end,State,SRes);
+	_ ->
+		State
+	end.
+
+update_user_pres_a(Muc_JID,StateData) ->
+    JID = jlib:jid_tolower(Muc_JID),
+    Pres_a =  remove_element(JID, StateData#state.pres_a),
+    Pres_a1 = (?SETS):add_element(JID, Pres_a),
+    StateData#state{pres_a =  Pres_a1}.
+
+send_join_muc_presence(From,Nick,Room,Host,Presence_packet) ->
+	case catch jlib:make_jid(Room,Host,Nick) of 
+	error ->
+		?INFO_MSG("send_join_muc_presence error ~p ~n",[Room]),
+		ok;	
+	NewTo ->
+		  ejabberd_router:route(From,NewTo, Presence_packet)
+	end.
+
+check_lower_version(Resource,Ver) ->
+	case str:str(Resource,<<"V[1012">>) of
+	0 ->
+		case catch str:str(Resource,<<"QIM_PC_">>) of
+		0 ->
+			true;
+		L when is_integer(L) ->
+			V1 = str:substr(Resource,5,4),
+			case catch binary_to_integer(V1) < Ver of
+			true ->
+				false;
+			_ ->
+				true
+			end;
+		_ ->
+			true
+		end;
+	L2 when is_integer(L2) ->
+		V2 = str:substr(Resource,7,4),
+		case catch binary_to_integer(V2) < Ver of
+		true ->
+			false;
+		_ ->
+			true
+		end;
+	_ ->
+		true
+	end.
+
+kick_lower_version_user(Server,Ver) ->
+    L = mnesia:dirty_select(session, [{#session{usr = '$1', _ = '_'},[{'==', {element, 2, '$1'}, Server}], ['$1']}]),
+    lists:foreach(fun({U,S,R}) ->
+			case check_lower_version(R,Ver) of
+			false ->
+				case mnesia:dirty_select(session,[{#session{sid = '$1',usr = {U,S,R},_ = '_'}, [], ['$1']}]) of
+				Users when is_list(Users) ->
+					[Pid ! {kick, kicked_by_admin, []} || {_, Pid} <- Users],
+					ok;
+				_ ->
+					ok
+				end;
+			true ->
+				ok
+			end end,L).

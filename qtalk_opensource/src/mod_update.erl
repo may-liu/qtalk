@@ -8,14 +8,16 @@
 -export([handle_call/3, handle_cast/2,
  	    handle_info/2, terminate/2, code_change/3]).
 
+-export([update_whitelist/1,update_blacklist/1]).
+-export([update_user_mask/4,del_user_mask/4,get_user_vcard_version/1,update_virtual_users/1]).
+
 -include("ejabberd.hrl").
 -include("logger.hrl").
--include("ejabberd_extend.hrl").
+-include("qunar_ejabberd_extend.hrl").
+-record(state, {sql_tref,ets_tref1,client_info_tref,blacklist_tref, iplimit_tref, server}).
 
 -define(SERVER, ?MODULE).
 -define(PROCNAME, ?SERVER).
-
--record(state, {pg_timer,ets_timer,list_user_timer,iplimit_timer, server}).
 
 start(Host,Opts) ->
          Proc = gen_mod:get_module_proc(Host, ?PROCNAME),
@@ -23,6 +25,7 @@ start(Host,Opts) ->
          {ok,_Pid} = supervisor:start_child(ejabberd_sup, ChildSpec).
 
 stop(Host) ->
+		table_handle:stop_ets_table(),
     	Proc = gen_mod:get_module_proc(Host, ?PROCNAME),
     	supervisor:terminate_child(ejabberd_sup, Proc),
     	supervisor:delete_child(ejabberd_sup, Proc).
@@ -30,60 +33,75 @@ stop(Host) ->
 start_link({Server,Opts}) ->
 	 gen_server:start_link({local, ?SERVER}, ?MODULE, [{Server,Opts}], []).
 
-init([{Server,_Opts}]) ->
+init([{Server,Opts}]) ->
 	create_ets_table(),
-	{ok, Pg_timer} = timer:send_interval(7200*1000, update_pgsql),
-	{ok, Ets_timer} = timer:send_interval(120*1000, update_ets),
-    {ok, List_user_timer} = timer:send_interval(3600*1000, update_list_user),
-    {ok, Iplimit_timer} = timer:send_interval(600 * 1000, update_iplimit),
-	{ok, #state{pg_timer = Pg_timer,ets_timer = Ets_timer,
-				   server = Server,list_user_timer = List_user_timer, iplimit_timer = Iplimit_timer},0}.
+	_Time = get_update_time(Opts),
+	{ok, TRef_sql} = timer:send_interval(7200*1000, update_pgsql),
+    {ok, BlacklistTRef} = timer:send_interval(3600*1000, update_blacklist),
+    {ok, IpLimitTRef} = timer:send_interval(600 * 1000, update_iplimit),
+	{ok, #state{sql_tref = TRef_sql,
+				   server = Server, blacklist_tref = BlacklistTRef, iplimit_tref = IpLimitTRef},0}.
 
-handle_call(stop, _From, State=#state{pg_timer = Pg_timer,ets_timer = Ets_timer,
-	   	list_user_timer = List_user_timer, iplimit_timer = Iplimit_timer}) ->
-	{ok, cancel} = timer:cancel(Pg_timer),
-	{ok, cancel} = timer:cancel(Ets_timer),
-	{ok, cancel} = timer:cancel(List_user_timer),
-	{ok, cancel} = timer:cancel(Iplimit_timer),
+handle_call(stop, _From, State=#state{sql_tref = TRef_sql, blacklist_tref = BlacklistTRef, iplimit_tref = IpLimitTRef}) ->
+	{ok, cancel} = timer:cancel(TRef_sql),
+	{ok, cancel} = timer:cancel(BlacklistTRef),
+	{ok, cancel} = timer:cancel(IpLimitTRef),
 	{stop, normal, stopped, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
+
+handle_cast({update_virtual_session,Session},State) ->
+    catch spawn(mod_extend_iq, update_virtual_session,[Session]),
+    ?DEBUG("start Session ~p ~n",[Session]),
+    {noreply, State};
+handle_cast({delete_virtual_session,From,To},State) ->
+    catch spawn(mod_extend_iq, end_virtual_session,[From,To]),
+    ?DEBUG("end Session ~p , ~p ~n",[From,To]),
+    {noreply, State};
+handle_cast({update_virtual_user,Virtual_user},State) ->
+    catch spawn(?MODULE,update_virtual_user,[State#state.server,Virtual_user,true]),
+    {noreply, State};
 handle_cast(_Msg, State) ->    
     {noreply, State}.
 
 handle_info(timeout, State=#state{server = LServer}) ->
-	update_online_users(LServer),
-	update_away_users(LServer),
-	update_department_info(LServer),
-    update_vcard_version(LServer),
+	catch ejabberd_s2s:update_s2s_mapperd_host(LServer),
+	update_department_pgsql(LServer),
     update_blacklist(LServer),
 	update_user_list(LServer),
 	update_whitelist(LServer),
+	update_vcard_version(LServer),
 	update_user_sn(LServer),
-	update_muc_vcard_version(LServer),
+	update_mac_push_notice(LServer),
 	subscription:update_subscription_info(LServer),
 	subscription:update_user_robots(LServer),
 	iplimit_util:update_iplimit(LServer),
+	update_multiple_users(LServer),
+	update_user_mask_list(LServer),
+    update_virtual_users(LServer),
+%%	update_mac_sub_users(LServer),
 	{noreply, State};
 handle_info(update_pgsql, State=#state{server = LServer}) ->
+	update_department_pgsql(LServer),
 	update_user_list(LServer),
 	update_user_sn(LServer),
+	update_user_mask_list(LServer),
 	{noreply, State};
-handle_info(update_ets, State=#state{server = LServer}) ->
-	update_online_users(LServer),
-	update_away_users(LServer),
-	update_user_status_list(LServer),
-	{noreply, State};
-handle_info(update_list_user, State=#state{server = LServer}) ->
+handle_info(update_blacklist, State=#state{server = LServer}) ->
 	update_whitelist(LServer),
     update_blacklist(LServer),
+	update_vcard_version(LServer),
 	subscription:update_subscription_info(LServer),
 	subscription:update_user_robots(LServer),
     {noreply, State};
 handle_info(update_iplimit, State=#state{server = LServer}) ->
     iplimit_util:update_iplimit(LServer),
+	update_mac_push_notice(LServer),
     {noreply, State};
+handle_info(update_user_info,State=#state{server = LServer}) ->
+	mod_day_check:clear_muc_users_dimission(LServer),
+	{noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -93,77 +111,26 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-update_department_info(LServer) ->
-	ets:delete_all_objects(name_nick),
-	ets:delete_all_objects(user_department),
-	case catch odbc_queries:get_department_info(jlib:nameprep(LServer)) of
-    {selected,_,Res} when is_list(Res) ->
-      Info =
-           lists:map(fun([D1,D2,D3,D4,D5,J,N,D,_Fp,_Sp]) ->
-	 			catch ets:insert(department_users,#department_users{dep1 = D1,dep2 = D2,dep3 = D3,dep4 = D4,dep5 = D5,user = J}),
-	 			catch ets:insert(nick_name,{N,J}),
-	 			catch ets:insert(name_nick,{J,N,D}),
-				{obj, [{"U", J}, {"D", D},{"N",N},{"S",0}]}
-             end,Res),
-      handle_abbreviate(Res),
-      handle_department:make_tree_dept(Res,true),
-      handle_department:get_dept_json(true),
-      Num = length(Res),
-	  ets:insert(cache_info,#cache_info{name = <<"user_num">>,cache = Num}),
-	  ets:insert(cache_info,#cache_info{name = <<"list_depts">>,cache = Info});
-    _ ->
-        ok
-    end.
+update_multiple_users(LServer) ->
+	catch ets:insert(multiple_users,{<<"dan.liu">>,1}),
+	catch ets:insert(multiple_users,{<<"ping.xue">>,1}),
+	catch ets:insert(multiple_users,{<<"lilulucas.li">>,1}),
+	catch ets:insert(multiple_users,{<<"xin.xie">>,1}),
+	catch ets:insert(multiple_users,{<<"xinbo.wang">>,1}).
 
-handle_abbreviate(Res) ->
-	Abbreviates =
-		lists:map(fun([_D1,_D2,_D3,_D4,_D5,J,_N,_D,Fp,Sp]) ->
-			{SF1,SF2} = spilt_abbreviate(binary_to_list(Fp)),
-			{SS1,SS2} = spilt_abbreviate(binary_to_list(Sp)),
-			{obj, [{"U", J}, {"FPY", list_to_binary(SF1)},{"FSX",list_to_binary(SF2)},
-				{"SPY",list_to_binary(SS1)},{"SSX",list_to_binary(SS2)}]} end,Res),
-	ets:delete(cache_info,<<"abbreviates">>),
-	catch ets:insert(cache_info,#cache_info{name = <<"abbreviates">>,cache = rfc4627:encode(Abbreviates)}).
-												
-spilt_abbreviate(Pinyin) ->
-	Abbreviates = string:tokens(Pinyin,"|"),
-	case length(Abbreviates) of
-	0 ->
-		{[],[]};
-	1 ->
-		[P] = Abbreviates,
-		{P,[]};
-	N when N rem 2 == 0 ->
-		Abbreviate1 = 
-			lists:foldl(fun(Num,Acc) -> 
-				case Num rem 2 of 
-				1 ->
-					case Acc of
-					[] ->
-						[lists:nth(Num,Abbreviates)];
-					_ ->
-						[lists:nth(Num,Abbreviates)] ++ "|" ++ Acc 
-					end;
-				_ ->
-					Acc
-				end end,[],lists:seq(1,N)),
-		Abbreviate2 = 
-			lists:foldl(fun(Num,Acc) -> 
-				case Num rem 2 of 
-				0 ->
-					case Acc of
-					[] ->
-						[lists:nth(Num,Abbreviates)];
-					_ ->
-						[lists:nth(Num,Abbreviates)] ++ "|" ++ Acc 
-					end;
-				_ ->
-					Acc
-				end end,[],lists:seq(1,N)),
-		{Abbreviate1,Abbreviate2};
-	_ ->
-		{[],[]}
-	end.
+update_department_pgsql(LServer) ->
+     case catch odbc_queries:get_department_info(jlib:nameprep(LServer)) of
+     {selected,[<<"dep1">>,<<"dep2">>,<<"dep3">>,<<"dep4">>,<<"dep5">>,<<"username">>,<<"name">>,<<"department">>,<<"fpinyin">>,<<"spinyin">>], SRes}
+      when is_list(SRes) ->
+			ets:delete_all_objects(roster_name_nick),
+      		lists:foreach(fun([D1,D2,D3,D4,D5,J,N,D,_Fp,_Sp]) -> 
+				catch ets:insert(department_users,#department_users{dep1 = D1,dep2 = D2,dep3 = D3,dep4 = D4,dep5 = D5,user = J}),
+				catch ets:insert(nick_name,{N,J}),
+				catch ets:insert(roster_name_nick,{J,N,D})
+		   	end,SRes);
+      _ ->
+                         []
+      end.	
 
 get_update_time(Opts) ->
     gen_mod:get_opt(update_time_interval, Opts,
@@ -175,30 +142,15 @@ create_ets_table() ->
 	table_handle:create_ets_table(),
     iplimit_util:create_ets().
 
-update_vcard_version(Server) ->
-    case catch odbc_queries:get_vcard_version(Server) of
-    {selected,_,Res} when is_list(Res) ->
-		ets:delete_all_objects(vcard_version),
-		lists:foreach(fun([User,Ver,Url]) ->
-				case ets:lookup(name_nick,User) of
-				[{_,N,_}] ->
-					catch ets:insert(vcard_version,#vcard_version{user = User,version = Ver, name = N,url = Url});
-				_ ->
-					catch ets:insert(vcard_version,#vcard_version{user = User,version = Ver, name = <<"">>,url = Url})
-				end  end,Res);
-	_ ->
-	          ok
-    end.
-
-update_muc_vcard_version(Server) ->
-   case catch odbc_queries:get_muc_vcard_version(Server) of
-   {selected,_,Res} when is_list(Res) ->
-		ets:delete_all_objects(muc_vcard),
-		lists:foreach(fun([M,N,D,T,P,V]) ->
-			ets:insert(muc_vcard,#muc_vcard{muc_name = M,show_name = N,muc_desc = D,muc_title = T,muc_pic = P,version = V}) end,Res);
+update_mac_sub_users(LServer) ->
+	case catch odbc_queries:get_mac_users(LServer) of
+	{selected,[<<"user_name">>],SRes}  when is_list(SRes) ->
+		lists:foreach(fun([U]) ->
+				mnesia:dirty_write(#mac_sub_users{user = U,key = <<"">> }) 
+				end,SRes);
 	_ ->
 		ok
-	end.
+	end.		
 
 update_blacklist(LServer) ->
     ets:delete_all_objects(blacklist),
@@ -211,55 +163,43 @@ update_blacklist(LServer) ->
 		?DEBUG("Get blacklist error for ~p ~n",[Error])
 	end.
     
+update_mac_push_notice(LServer) ->
+    ets:delete_all_objects(mac_push_notice),
+	case catch ejabberd_odbc:sql_query(jlib:nameprep(LServer),
+		 [<<"select user_name,shield_user  from mac_push_notice ;">>]) of
+	{selected,[<<"user_name">>,<<"shield_user">>],SRes}
+	when is_list(SRes) ->
+		lists:foreach(fun([User,Shield]) ->
+			ets:insert(mac_push_notice,#mac_push_notice{user = {User,Shield}}) end,SRes);
+	Error ->
+		?DEBUG("Get blacklist error for ~p ~n",[Error])
+	end.
+
 update_user_list(LServer) ->
+    ets:delete_all_objects(userlist),
 	case catch odbc_queries:list_users(jlib:nameprep(LServer)) of
 	{selected,[<<"username">>],SRes}
 	when is_list(SRes) ->
-    	ets:delete_all_objects(user_list),
 		lists:foreach(fun([Username]) ->
-			ets:insert(user_list,{Username}) end,SRes);
+			ets:insert(userlist,{Username}) end,SRes);
 	Error ->
-		?DEBUG("Get user_list error for ~p ~n",[Error])
+		?DEBUG("Get userlist error for ~p ~n",[Error])
 	end.
 
 update_whitelist(LServer) ->
+    ets:delete_all_objects(whitelist),
 	case catch odbc_queries:get_white_list_users(jlib:nameprep(LServer)) of
 	{selected,[<<"username">>, <<"single_flag">>],SRes}
 	when is_list(SRes) ->
-    	ets:delete_all_objects(whitelist),
 		lists:foreach(fun([Username, SingleFlag]) ->
 			ets:insert(whitelist,{Username, SingleFlag}) end,SRes);
 	Error ->
 		?DEBUG("Get whitelist error for ~p ~n",[Error])
 	end.
 
-update_online_users(Server) ->
-	case  ejabberd_sm:get_vh_session_list(Server) of
-	Online_users when is_list(Online_users) ->
-		OUsers = 
-			lists:map(fun({User,_,_}) ->
-				ets:insert(online_users,{User}),User end,Online_users),
-        ets:insert(cache_info,#cache_info{name = <<"online1">>,cache = {obj, [{<<"Online_Users">>,OUsers}]}});
-	_ ->
-		ok
-	end.
-		
-update_away_users(LServer) ->
-    ets:delete_all_objects(away_users),
-	Server = jlib:nameprep(LServer),
-	case catch mnesia:dirty_select(session,[{#session{usr = {'$1','$2','_' },show = <<"away">>, _ = '_'},[{'==', '$2', Server}], ['$1']}]) of 
-	U when is_list(U) ->
-		lists:foreach(fun(User) ->
-			ets:insert(away_users,{User}) end,U),
-		Away_Users = [{obj, [{<<"Away_Users">>,U}]}],
-		ets:insert(cache_info,#cache_info{name = <<"away_users">>,cache = Away_Users });
-	_ ->
-		ok
-	end.
-
 update_user_sn(LServer) ->
        ets:delete_all_objects(sn_user),
-       case catch ejabberd_odbc:sql_query(LServer,[<<"select sn,hire_type from users;">>]) of
+       case catch ejabberd_odbc:sql_query(LServer,[<<"select sn,hire_type from users where hire_flag > 0;">>]) of
        {selected, [<<"sn">>,<<"hire_type">>], SRes} when is_list(SRes) ->
              lists:foreach(fun([Sn,Hire_type]) ->
 					case Hire_type =/= <<"实习生（地推）"/utf8>> andalso Hire_type =/= <<"实习（HC）"/utf8>> 
@@ -273,19 +213,152 @@ update_user_sn(LServer) ->
 	               ok
        end.
 
-update_user_status_list(_Server) ->
-	catch ets:delete_all_objects(online_status),
-	lists:foreach(fun({U}) ->
-			case ets:lookup(away_users,U) of
-			[] ->
-				ets:insert(online_status,#online_status{user = U,status = 6});
+update_black_version(Server) ->
+	case catch ejabberd_odbc:sql_query(Server,[<<"select version from black_version;">>]) of
+	{selected, [<<"version">>],Res}  when is_list(Res) ->
+		ets:delete_all_objects(black_version),
+		lists:foreach(fun(V) ->
+			ets:insert(black_version,{V,1}) end,Res);
+	_ ->
+		ok
+	end.
+
+update_user_mask_list(Server) ->
+	case catch ejabberd_odbc:sql_query(Server,[<<"select user_name,masked_user from mask_users;">>]) of
+	{selected, [<<"user_name">>,<<"masked_user">>], SRes} when is_list(SRes) ->
+		catch ets:delete_all_objects(user_mask_list),
+		catch ets:delete_all_objects(shield_user),
+		lists:foreach(fun([U,M]) ->
+					update_user_mask(Server,U,M,false) end,SRes);
+	_ ->
+		ok
+	end.
+					
+
+update_user_mask(Server,User,Mask,Sql_flag) ->
+	case catch ets:lookup(user_mask_list,User) of
+	[] ->
+		case Sql_flag of
+		true ->
+			catch ejabberd_odbc:sql_query(Server,
+				[<<"insert into mask_users(user_name,masked_user) values ('">>,User,<<"','">>,Mask,<<"');">>]);
+		_ ->
+			ok
+		end,
+		catch ets:insert(user_mask_list,{User,[Mask]}),
+		catch ets:insert(shield_user,{list_to_binary(lists:sort([User,Mask])),1});
+	[{User,L}] ->
+		case catch lists:member(Mask,L) of
+		false ->
+			case Sql_flag of
+			true ->
+				catch ejabberd_odbc:sql_query(Server,
+					[<<"insert into mask_users(user_name,masked_user) values ('">>,User,<<"','">>,Mask,<<"');">>]);
 			_ ->
-				ets:insert(online_status,#online_status{user = U,status = 1})
-			end end, ets:tab2list(online_users)),
+				ok
+			end,
+			catch ets:insert(user_mask_list,{User,[Mask] ++ L}),
+			catch ets:insert(shield_user,{list_to_binary(lists:sort([User,Mask])),1});
+		true ->
+			ok
+		end;
+	_ ->
+		ok
+	end.
+		 	
+del_user_mask(Server,User,Mask,Sql_flag) ->
+	case catch ets:lookup(user_mask_list,User) of
+	[] ->
+		ok;
+	[{User,L}] ->
+		case catch lists:member(Mask,L) of
+		true ->
+			case Sql_flag of
+			true ->
+				catch ejabberd_odbc:sql_query(Server,
+					[<<"delete from mask_users where user_name = '">>,User,<<"' and masked_user = '">>,Mask,<<"';">>]);
+			_ ->
+				ok
+			end,
+			NewUL = L -- [Mask],
+			case NewUL of
+			[] ->
+				ets:delete(user_mask_list,User);
+			_ ->
+				ets:insert(user_mask_list, {User,NewUL})
+			end,
+			del_ets_shield_user(User,Mask);
+		_ ->
+			ok
+		end;
+	_ ->
+		ok
+	end.
 
-    Res =
-        lists:map(fun(U) ->
-	       	{obj, [{"U", U#online_status.user},{"S",U#online_status.status}]} end,ets:tab2list(online_status)),
-	catch ets:delete(cache_info,<<"online2">>),
-    ets:insert(cache_info,#cache_info{name = <<"online2">>,cache = {obj,[{"Online_User_Status",Res}]}}).
+del_ets_shield_user(User,Mask) ->
+	case catch ets:lookup(user_mask_list,Mask) of	
+	[] ->
+		catch ets:delete(shield_user,list_to_binary(lists:sort([User,Mask])));
+	[{Mask,L}] when is_list(L) ->
+		case catch lists:member(User,L) of
+		false ->	
+			catch ets:delete(shield_user,list_to_binary(lists:sort([User,Mask])));
+		_ ->
+			ok
+		end;
+	_ ->
+		ok
+	end.
 
+update_vcard_version(Server) ->
+	case catch ejabberd_odbc:sql_query(Server,[<<"select username,version,url from vcard_version;">>]) of
+	{selected,_,SRes} when is_list(SRes) ->
+		lists:foreach(fun([U,V,L]) ->
+			ets:insert(vcard_version,#vcard_version{user = U,version = V,url = L}) end,SRes);
+	_ ->
+		ok
+	end.
+
+get_user_vcard_version(User) ->
+	case catch ets:lookup(vcard_version,User) of
+	[] ->
+		{<<"1">>,<<"">>};
+	[Vcard] when is_record(Vcard,vcard_version) ->
+		{Vcard#vcard_version.version,Vcard#vcard_version.url};
+	_ ->
+		{<<"1">>,<<"">>}
+	end.
+
+
+update_virtual_user(Server,User,Flag) ->
+    case Flag of
+    false ->
+        catch ets:delete(virtual_user,User);
+    _ ->
+        ok
+    end,
+    case catch ejabberd_odbc:sql_query(Server,[<<"select real_user,on_duty_flag from virtual_user_list where virtual_user = '">>,User,<<"';">>]) of
+    {selected,_,SRes} when is_list(SRes) ->
+        Users = 
+            lists:flatmap(fun([U,F]) ->
+                case F of
+                <<"1">> ->
+                    [U];
+                _ ->
+                    []
+                end end,SRes),
+        catch ets:insert(virtual_user,{User,Users});
+    _ ->
+        ok
+    end.
+
+update_virtual_users(Server) ->
+    catch ets:delete_all_object(virtual_user),
+    case catch ejabberd_odbc:sql_query(Server,[<<"select distinct(virtual_user) from virtual_user_list;">>]) of
+    {selected,_,SRes} when is_list(SRes) ->
+        lists:foreach(fun([U]) ->
+            update_virtual_user(Server,U,false) end,SRes);
+    _ ->
+        ok
+    end.
+    

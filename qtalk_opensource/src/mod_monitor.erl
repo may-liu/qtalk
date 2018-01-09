@@ -1,16 +1,16 @@
 -module(mod_monitor).
 
 -behaviour(gen_server).
--behaviour(gen_mod).
 
 -export([start/2,stop/1,start_link/2,init/1]).
 
 -export([handle_call/3, handle_cast/2,
  	    handle_info/2, terminate/2, code_change/3]).
--export([count_user_login_out/3,count_user_login_in/3,monitor_count/4,monitor_size/3,monitor_value/3,user_online_day_sum/1]).
+-export([count_user_login_out/3,count_user_login_in/3,monitor_count/3,monitor_count_time/3,monitor_size/3,monitor_value/3,user_online_day_sum/1]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
+
 
 -define(SERVER, ?MODULE).
 
@@ -33,7 +33,7 @@ stop(Host) ->
 start_link(Server,Opts) ->
 	gen_server:start_link({local, get_proc_name(Server)}, ?MODULE, [Server,Opts], []).
 
-init([Server,_Opts]) ->
+init([Server,Opts]) ->
 	Timestamp = mod_time:get_timestamp(),
 	case mod_time:get_timestamp_of_end_day(Timestamp) of
 	0 ->
@@ -55,20 +55,40 @@ handle_call(stop, _From, State=#state{day_timer = Day_tref,minute_timer = Min_tr
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
-handle_cast({monitor_many,Key,Count,Time},State) ->
+handle_cast({monitor_count_many,Key,Count},State) ->
 	case catch ets:lookup(monitor_count,Key) of 
 	[] ->
-		catch ets:insert(monitor_count,#monitor_rec{key = Key,count = Count,time = Time});
+		catch ets:insert(monitor_count,#monitor_rec{key = Key,count = Count,time = 0});
 	[MonitorV] ->
 		NewMV = #monitor_rec{key = Key,
-							 count = MonitorV#monitor_rec.count + Count,
+							 count = MonitorV#monitor_rec.count + Count
+						%%	 time =  MonitorV#monitor_rec.time + Time
+							},
+		catch ets:insert(monitor_count,NewMV)
+	end,
+	{noreply,State};
+handle_cast({monitor_count_time,Key,Time},State) ->
+	case catch ets:lookup(monitor_count,Key) of 
+	[] ->
+		catch ets:insert(monitor_count,#monitor_rec{key = Key,count = 0,time = Time});
+	[MonitorV] ->
+		NewMV = #monitor_rec{key = Key,
+						%%	 count = MonitorV#monitor_rec.count + Count,
 							 time =  MonitorV#monitor_rec.time + Time
 							},
 		catch ets:insert(monitor_count,NewMV)
 	end,
 	{noreply,State};
 handle_cast({monitor_size,Key,Value},State) ->
-	catch ets:insert(monitor_value,#monitor_val{key = Key,value = Value}),
+	case catch ets:lookup(monitor_value,Key) of 
+	[] ->
+		catch ets:insert(monitor_value,#monitor_val{key = Key,value = Value});
+	[MonitorV] ->
+		NewMV = #monitor_val{key = Key,
+							 value = Value
+							},
+		catch ets:insert(monitor_value,NewMV)
+	end,
 	{noreply,State};
 handle_cast({monitor_value,Key,Value},State) ->
 	case catch ets:lookup(monitor_value,Key) of 
@@ -84,22 +104,26 @@ handle_cast({monitor_value,Key,Value},State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({timeout, _TimerRef, first_day_sum},State=#state{server = Server}) ->
+handle_info({timeout, TimerRef, first_day_sum},State=#state{server = Server}) ->
 	user_online_day_sum(Server),
 	New_day_tref = erlang:start_timer(86400*1000,self(),day_sum),
+    catch memory_free:memory_free(200), 
 	NewState = State#state{day_timer = New_day_tref},
 	{noreply, NewState};
-handle_info({timeout, _TimerRef, day_sum},State=#state{server = Server}) ->
+handle_info({timeout, TimerRef, day_sum},State=#state{server = Server}) ->
 	New_day_tref = erlang:start_timer(86400*1000,self(),day_sum),
+    catch memory_free:memory_free(200), 
 	user_online_day_sum(Server),
 	NewState = State#state{day_timer = New_day_tref},
 	{noreply,NewState};
-handle_info({timeout, _TimerRef, minute_count},State) ->
-	catch monitor_size(State#state.server,<<"user_login_Value">>,ejabberd_sm:get_vh_session_number(State#state.server)),
-	catch monitor_size(State#state.server,<<"muc_permanent_room_Value">>,mnesia:table_info(muc_room,size)),
-	catch monitor_size(State#state.server,<<"muc_online_room_Value">>,mnesia:table_info(muc_online_room,size)),
+handle_info({timeout, TimerRef, minute_count},State=#state{server = Server}) ->
+%%	Node_num = length(nodes(known)),
+	Node_num = 2,
+	catch monitor_size(State#state.server,<<"user_login_Value">>,erlang:trunc(ejabberd_sm:get_vh_session_number(State#state.server)/Node_num)),
+	catch monitor_size(State#state.server,<<"muc_permanent_room_Value">>,erlang:trunc(mnesia:table_info(muc_room,size)/Node_num)),
+	catch monitor_size(State#state.server,<<"muc_online_room_Value">>,erlang:trunc(mnesia:table_info(muc_online_room,size)/Node_num)),
 	resave_ets_info(),			
-    erlang:start_timer(60*1000,self(),minute_count),
+    Tref_Min = erlang:start_timer(60*1000,self(),minute_count),
 	{noreply,State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -110,14 +134,17 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-count_user_login_in(Host,User,_Time) ->
+count_user_login_in(Host,User,Time) ->
 	note_user_login_in(User,Host).
 
-count_user_login_out(Host,User,_Time) ->
+count_user_login_out(Host,User,Time) ->
 	note_user_login_out(User,Host).
 
-monitor_count(Host,Key,Count,Time) ->
-	gen_server:cast(get_proc_name(Host), {monitor_many,Key,Count,Time}).
+monitor_count(Host,Key,Count) ->
+	gen_server:cast(get_proc_name(Host), {monitor_count_many,Key,Count}).
+
+monitor_count_time(Host,Key,Time) ->
+	gen_server:cast(get_proc_name(Host), {monitor_count_time,Key,Time}).
 
 monitor_size(Host,Key,Value) ->
 	gen_server:cast(get_proc_name(Host), {monitor_size,Key,Value}).
@@ -220,11 +247,11 @@ relogin_out_time_sum(Server,User,Date,Re_login_flag) ->
 		0 ->
 			ok;
 		N when is_integer(N)  ->
-			case catch odbc_queries:insert_day_online(Server,User,Date,N) of
-			{updated, 1} -> 
-					ok;
-             Error -> ?DEBUG("Pgsql error  is ~p ~n",[Error])
-			 end;
+		%	case catch odbc_queries:insert_day_online(Server,User,Date,N) of
+		%	{updated, 1} -> {atomic, ok};
+         %    A -> ?DEBUG("Pgsql error  is ~p ~n",[A])
+		%	 end;
+			ok;
 		_ ->
 			ok
 		end,
@@ -239,12 +266,12 @@ resave_ets_info() ->
 			case ets:lookup(monitor_sum,Ci#monitor_rec.key) of
 			[] ->
 				ets:insert(monitor_sum,Ci);
-			_ ->
+			[Old_Ms] ->
 				Time = 
 					case Ci#monitor_rec.count of
 					0 ->
 						Ci#monitor_rec.time;
-					_ ->
+					C ->
 						Ci#monitor_rec.time / Ci#monitor_rec.count
 					end,
 					ets:insert(monitor_sum,#monitor_rec{key = Ci#monitor_rec.key,count = Ci#monitor_rec.count,
@@ -256,4 +283,4 @@ resave_ets_info() ->
 	lists:foreach(fun(Vi) ->
 				ets:insert(monitor_sum,Vi) 
 			end,Value_info).
-	
+

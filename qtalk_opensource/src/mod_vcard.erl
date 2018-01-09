@@ -31,7 +31,7 @@
 
 -export([start/2, init/3, stop/1, get_sm_features/5,
 	 process_local_iq/3, process_sm_iq/3, reindex_vcards/0,
-	 remove_user/2, export/1, import/1, import/3,change_tab_store/0]).
+	 remove_user/2, export/1, import/1, import/3,change_tab_store/1]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -1156,7 +1156,7 @@ import(_LServer, riak, #vcard_search{}) ->
 import(_, _, _) ->
     pass.
 
-change_tab_store() ->
+change_tab_store(Server) ->
 	{_,V} = mnesia:transaction(fun() ->mnesia:select(vcard,[{#vcard{_='_'},[],['$_']}]) end),	
 	lists:foreach(fun(Vc) ->
 		#vcard{us = {LUser, LServer}, vcard = VCARD} = Vc,
@@ -1167,7 +1167,7 @@ change_tab_store() ->
 						  [<<"username='">>, ejabberd_odbc:escape(LUser), <<"'">>]) end) end,V),
 	{_,Vs} = mnesia:transaction(fun() ->mnesia:select(vcard,[{#vcard_search{_='_'},[],['$_']}]) end),
 	lists:foreach(fun(Vc1) ->
-		#vcard_search{us = {_LUser, LServer},user = Username,luser = LUsername, fn = SFN,lfn = SLFN, family = SFamily,
+		#vcard_search{us = {LUser, LServer},user = Username,luser = LUsername, fn = SFN,lfn = SLFN, family = SFamily,
 				  lfamily = SLFamily,given = SGiven,lgiven = SLGiven,middle = SMiddle,lmiddle = SLMiddle,nickname = SNickname,
 				  lnickname = SLNickname,bday = SBDay, lbday = SLBDay,ctry = SCTRY,lctry = SLCTRY, locality = SLocality, llocality = SLLocality,
 				  email = SEMail,lemail = SLEMail,orgname = SOrgName,lorgname = SLOrgName, orgunit = SOrgUnit, lorgunit = SLOrgUnit} = Vc1,

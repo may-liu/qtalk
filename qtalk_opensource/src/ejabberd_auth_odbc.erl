@@ -40,7 +40,8 @@
 	 remove_user/3, store_type/0,
 	 plain_password_required/0]).
 
--export([get_login_url_by_keyword/1]).
+-export([kick_token_login_user/2]).
+-export([check_multiple_login_user/1]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -49,7 +50,8 @@
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
-start(_Host) -> ok.
+start(_Host) -> 
+	ok.
 
 plain_password_required() -> false.
 
@@ -63,7 +65,6 @@ check_password(User, Server, Password) ->
             Username = ejabberd_odbc:escape(LUser),
             LServer = jlib:nameprep(Server),
             do_check_password(LServer, Username, Password, check_frozen_flag(Username))
-%%			true
     end.
 
 check_frozen_flag(Username) ->
@@ -90,7 +91,30 @@ check_white_list(Username) ->
 do_check_password(_, _, _, false) ->
     {false, <<"frozen-in">>};
 do_check_password(LServer, Username, Password, _) ->
-	check_user_password(LServer, Username, Password).
+	case use_local_rsa_login() of
+	true ->
+		check_user_password_use_rsa(LServer, Username, Password);
+	_ ->
+		check_user_password(LServer, Username, Password)
+	end.
+
+check_user_password_use_rsa(LServer, Username, Password) ->
+	true.
+
+do_check_user_password_use_rsa(LServer, Username, Password) ->
+	case catch rfc4627:decode(Password) of
+	{ok,{obj,Args},[]} ->
+		Pass = proplists:get_value("p",Args),
+		case catch do_check_password1(LServer,Username,Pass) of
+		true ->
+			true;
+		_ ->
+			false
+		end;
+	_ ->
+			false
+	end.
+	
 
 check_user_password(LServer, Username, Password) ->
     try check_white_list(Username) of
@@ -100,7 +124,7 @@ check_user_password(LServer, Username, Password) ->
                 check_user_resources(LServer, Username, SingleFlag),
 				true;
 			_ ->
-				case catch check_password_use_http(password,LServer,get_login_url_by_keyword('password'),Username,Password)  of
+				case catch check_password_use_http(password,LServer,<<"">>,Username,Password)  of
 				true ->
 					true;
 				_ ->
@@ -108,7 +132,7 @@ check_user_password(LServer, Username, Password) ->
 				end
 			end;
 		false ->
-			case catch check_password_use_http(password,LServer,get_login_url_by_keyword('password'),Username,Password)  of
+			case catch check_password_use_http(password,LServer,<<"">>,Username,Password)  of
 			true ->
 				true;
 			_ ->
@@ -133,7 +157,6 @@ check_user_resources(LServer, Username, single) ->
               end, Resources)
     end.
 do_check_password1(LServer, Username, Password) ->
-	?DEBUG("User ~p ,Password ~p ~n",[Username, Password]),
     try odbc_queries:get_password(LServer, Username) of
         {selected, [<<"password">>], [[Password]]} ->
             Password /= <<"">>;
@@ -148,11 +171,11 @@ do_check_password1(LServer, Username, Password) ->
         _:_ ->
             false %% Typical error is database not accessible
     end.
-%%--------------------------------------------------------
+
 %% Port 5223 password format: Key@Passowrd
 %% Key: machine key,use to mark single machine
 %% Passoword: identifying code 
-%% -------------------------------------------------------
+%% Passoword: identifying code 
 check_wlan_password(User, Server, Pass) ->
     case str:str(Pass,<<"@">>) of
     0 ->
@@ -176,28 +199,31 @@ check_wlan_password(User, Server, Pass) ->
         LUser ->
         	Username = ejabberd_odbc:escape(LUser),
             LServer = jlib:nameprep(Server),
-            NewKey = lists:concat([binary_to_list(Username),"_",binary_to_list(Key)]),
+         %   NewKey = lists:concat([binary_to_list(Username),"_",binary_to_list(Key)]),
 			case catch ets:lookup(sn_user,str:to_upper(Username)) of
 			[] ->
-            	do_check_wlan_password(LServer, Username, NewKey, Password,Key,check_frozen_flag(Username));
+            	do_check_wlan_password(LServer,check_multiple_login_user(Username),
+					   	Username, Key, Password,Key,check_frozen_flag(Username));
 			 _ ->
 				{false,<<"regular_staffs not alow sn check_in">>}
 		    end
         end
    end.
 
-%%---------------------------------------------------------
-%%检查用户token，黑名单中禁止登陆，检查顺序：1.redis 2.http
-%%---------------------------------------------------------
-do_check_wlan_password(_, _, _, _, _,false) ->
+do_check_wlan_password(_,_, _, _, _, _,false) ->
     {false, <<"frozen-in">>};
-do_check_wlan_password(LServer, Username, NewKey, Password,_, _) ->
-    case redis_link:str_get(LServer,0,NewKey) of
+do_check_wlan_password(LServer,true,Username,NewKey,Password,_,_) ->
+	do_check_wlan_password1(LServer,Username,NewKey,Password,<<"">>,<<"">>);	
+do_check_wlan_password(LServer,false,Username, NewKey, Password,_, _) ->
+ %%   case redis_link:str_get(LServer,5,NewKey) of
+    case redis_link:str_get(LServer,5,Username) of
     {ok,undefined}  ->
 		check_http_redis_token(LServer,Username,Password,NewKey,false);
     {ok,V} ->
 		case V =:= Password of 
         true ->
+%%			catch redis_link:hash_set(LServer,2,str:concat(Username,<<"_tkey">>),NewKey,mod_time:get_timestamp()),
+			set_user_mac_key(LServer,Username,NewKey),
             true;
        	false ->
 			check_http_redis_token(LServer,Username,Password,NewKey,true)	
@@ -206,14 +232,55 @@ do_check_wlan_password(LServer, Username, NewKey, Password,_, _) ->
         false
      end.
 
-%%----------------------------------------------
-%%http验证token成功，使用改token作为密码,实效7天
-%%----------------------------------------------
 check_http_redis_token(LServer,Username,Password,NewKey,Redis_Flag)  ->
-	case check_password_use_http(token,LServer,get_login_url_by_keyword('token'),Username,Password) of
+	case check_password_use_http(token1,LServer,<<"">>,Username,Password) of
     true ->
-       	case redis_link:str_setex(LServer,0,NewKey,86400*7,Password) of
+%%       	case redis_link:str_setex(LServer,0,NewKey,86400*7,Password) of
+       	case redis_link:str_setex(LServer,5,Username,86400*90,Password) of
 		{ok,<<"OK">>} ->
+	%%		catch redis_link:hash_set(LServer,2,str:concat(Username,<<"_tkey">>),NewKey,mod_time:get_timestamp()),
+			set_user_mac_key(LServer,Username,NewKey),
+			true;
+         _ ->
+		 	?INFO_MSG("Redis set Username ~p  key ~p failed !",[Username,NewKey]),
+            true
+         end;
+     false ->
+	 		case Redis_Flag of 
+			true ->
+				false;
+			_ ->
+				{false,<<"out_of_date">>}
+			end
+     end.
+
+do_check_wlan_password1(LServer, Username, NewKey, Password,_, _) ->
+   %% case redis_link:str_get(LServer,0,NewKey) of
+    case redis_link:str_get(LServer,5,NewKey) of
+    {ok,undefined}  ->
+		check_http_redis_token1(LServer,Username,Password,NewKey,false);
+    {ok,V} ->
+		case V =:= Password of 
+        true ->
+			set_user_mac_key(LServer,Username,NewKey),
+%			catch redis_link:hash_set(LServer,2,str:concat(Username,<<"_tkey">>),NewKey,mod_time:get_timestamp()),
+            true;
+       	false ->
+			check_http_redis_token1(LServer,Username,Password,NewKey,true)	
+        end;
+     A ->
+        ?DEBUG("do_check_wlan_password expection ~p ~n",[A]), 
+        false
+     end.
+
+check_http_redis_token1(LServer,Username,Password,NewKey,Redis_Flag)  ->
+	case check_password_use_http(token1,LServer,<<"">>,Username,Password) of
+    true ->
+      	case redis_link:str_setex(LServer,5,NewKey,86400*90,Password) of
+%%       	case redis_link:str_setex(LServer,5,Username,86400*30,Password) of
+		{ok,<<"OK">>} ->
+%%			catch redis_link:hash_set(LServer,2,str:concat(Username,<<"_tkey">>),NewKey,mod_time:get_timestamp()),
+			set_user_mac_key(LServer,Username,NewKey),
 			true;
          _ ->
 		 	?INFO_MSG("Redis set Username ~p  key ~p failed !",[Username,NewKey]),
@@ -361,7 +428,7 @@ is_user_exists(User, Server) ->
     LUser ->
 	  Username = ejabberd_odbc:escape(LUser),
 	  LServer = jlib:nameprep(Server),
-	  case catch ets:lookup(user_list,Username) of
+	  case catch ets:lookup(userlist,Username) of
 	  [] ->
 	  	try odbc_queries:get_password(LServer, Username) of
 	    	{selected, [<<"password">>], [[_Password]]} ->
@@ -373,7 +440,7 @@ is_user_exists(User, Server) ->
 	  	  _:B -> {error, B}
 	  	end;
 	   _ ->
-	   	false
+	   	true
 	   end
     end.
 
@@ -414,11 +481,8 @@ remove_user(User, Server, Password) ->
 	  Result
     end.
 
-%%-------------------------------------------
-%%预设的3种验密
-%%-------------------------------------------
 check_password_use_http(password,Server,URL,User,Password) ->
-	?INFO_MSG("URL ~p ~n",[URL]),
+    Url = "http://xxxxxx.com/v1/auth",
     Data = binary_to_list(Password),
 	Random_Num1 = random:uniform(99999),
 	Random_Num2 = random:uniform(99999),
@@ -429,27 +493,26 @@ check_password_use_http(password,Server,URL,User,Password) ->
     UserName  = binary_to_list(User),
     Bodys = format_multipart_formdata(Boundary, [{a,"testapp"},{uid, UserName}], [{p, Data,[]}]),
     Headers = [{"Content-Length", integer_to_list(length(Bodys))}], 
-	http_validate_password(Server,URL,Headers,Type,Bodys,HTTPOptions,Options,User,Password);
+	http_validate_password(Server,Url,Headers,Type,Bodys,HTTPOptions,Options,User,Password);
 check_password_use_http(token,Server,URL,User,Password) ->
+    Url = "https://xxxxxxxx.com/1.0/auth",
     Header = [],
     Type = "application/x-www-form-urlencoded",
     Body = lists:concat(["token=",binary_to_list(Password)]),
     HTTPOptions = [],
     Options = [],	
-	http_validate_password(Server,URL,Header,Type,Body,HTTPOptions,Options,User,Password);
+	http_validate_password(Server,Url,Header,Type,Body,HTTPOptions,Options,User,Password);
 check_password_use_http(token1,Server,URL,User,Password) ->
+    Url = "https://xxxxxxxxx.com/2.0/auth",
     Header = [],
     Type = "application/x-www-form-urlencoded",
     Body = lists:concat(["token=",binary_to_list(Password)]),
     HTTPOptions = [],
     Options = [],	
-	http_validate_password(Server,URL,Header,Type,Body,HTTPOptions,Options,User,Password);
+	http_validate_password(Server,Url,Header,Type,Body,HTTPOptions,Options,User,Password);
 check_password_use_http(_,_,_,_,_) ->
 	false.
 
-%%----------------------------------------------------------------------------------
-%%通过http接口验证登陆密码,密码经过rsa加密，关键字中含有时间，不存在服务端泄密的问题
-%%----------------------------------------------------------------------------------
 http_validate_password(Server,Url,Headers,Type,Bodys,HTTPOptions,Options,UserName,Password) ->
 	case catch http_client:http_post(Server,Url,Headers,Type,Bodys,HTTPOptions,Options) of
 	{ok, {_Status,_Headers, Data}} -> 
@@ -498,13 +561,105 @@ format_multipart_formdata(Boundary, Fields, Files) ->
     Parts = lists:append([FieldParts2, FileParts2, EndingParts]),
     string:join(Parts, "\r\n").
 
-%%-------------------------------------------
-%%通过关键字获取登陆url
-%%-------------------------------------------
-get_login_url_by_keyword(Keyword) ->
-	case catch ejabberd_config:get_option(http_login_url, fun(V) -> V end) of
-	Url when is_list(Url) ->
-		binary_to_list(proplists:get_value(Keyword,Url));
+kick_token_login_user1(Username,Server) ->
+	case ejabberd_sm:get_user_resources(Username, Server) of
+    [] ->
+    	ok;
+    Resources ->
+        lists:foreach(
+        	fun(Resource) ->
+				case str:str(Resource,<<"Android">>) == 0 andalso str:str(Resource,<<"iPhone">>) == 0 of
+				false ->
+				   case ejabberd_sm:get_session_pid(Username, Server, Resource) of
+				   PID when is_pid(PID) ->
+           	    		PID ! kick;
+  					_ ->
+						ok
+					end;
+			   true ->
+					ok
+				end
+    		end, Resources)
+    end.
+
+kick_token_login_user(Username,Server) ->
+	case ejabberd_sm:get_user_present_resources_and_pid(Username, Server) of
+    [] ->
+    	ok;
+    Resources ->
+        lists:foreach(
+        	fun({_,Resource,PID}) ->
+				case str:str(Resource,<<"Android">>) =:= 0 andalso str:str(Resource,<<"iPhone">>) =:= 0 of
+				false ->
+					if is_pid(PID) ->
+           	    		PID ! kick;
+  					true ->
+						ok
+					end;
+			   true ->
+					ok
+				end
+    		end, Resources)
+    end.
+
+check_multiple_login_user(User) ->
+	case catch ets:lookup(multiple_users,User) of
+	[{User,1}] ->
+		true;
 	_ ->
-		[]
+		false
 	end.
+
+use_local_rsa_login() ->
+	case catch ets:lookup(rsa_info,<<"use_local_rsa">>) of
+	[] ->
+		case ejabberd_config:get_option(rsa_auth,fun(V) -> V end) of
+		undefined ->
+			catch ets:insert(rsa_info,{<<"use_local_rsa">>, false}),
+			false;
+		L ->
+			case proplists:get_value(use_local_rsa,L) of
+			true ->
+				catch ets:insert(rsa_info,{<<"use_local_rsa">>, true}),
+				insert_ets_rsa_info(L),
+				true;
+			_ ->
+				catch ets:insert(rsa_info,{<<"use_local_rsa">>, false}),
+				false
+			end
+		end;
+	[{<<"use_local_rsa">>,F}] ->
+		F;
+	_ ->
+		false
+	end.
+
+insert_ets_rsa_info(L) ->
+	case proplists:get_value(rsafile,L) of
+	undefined ->
+		catch ets:insert(rsa_info,{<<"rsa_info">>,<<"null">>});
+	FileName ->
+		{ok, PemBin} = file:read_file(FileName),
+		[Entry] = public_key:pem_decode(PemBin),
+		Rsa_info = public_key:pem_entry_decode(Entry),
+		catch ets:insert(rsa_info,{<<"rsa_info">>,Rsa_info})
+	end.
+
+
+set_user_mac_key(Server,User,Key) ->
+	UTkey = str:concat(User,<<"_tkey">>),
+	case redis_link:redis_cmd(Server,2,["HKEYS",UTkey]) of
+	{ok,L} when is_list(L) ->
+		case lists:member(Key,L) of
+		true ->
+			lists:foreach(fun(K) ->
+					catch redis_link:hash_del(Server,2,UTkey,K) end,L -- [Key]);
+		_ ->
+			lists:foreach(fun(K) ->
+					catch redis_link:hash_del(Server,2,UTkey,K) end,L -- [Key]),
+			catch redis_link:hash_set(Server,2,UTkey,Key,mod_time:get_timestamp())
+		end;
+	_ ->
+		catch redis_link:hash_set(Server,2,UTkey,Key,mod_time:get_timestamp())
+	end.
+

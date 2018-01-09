@@ -85,6 +85,8 @@
          timer = make_ref()               :: reference()}).
 
 %%-define(DBGFSM, true).
+-record(s2s_mapperd,{domain = <<"">>,host_lists = []}).
+-record(host_info,{host,port,priority,weight}).
 
 -ifdef(DBGFSM).
 
@@ -221,6 +223,7 @@ init([From, Server, Type]) ->
 			  start_connection(self()), {false, {Pid, Key, SID}}
 		    end,
     Timer = erlang:start_timer(?S2STIMEOUT, self(), []),
+    ?DEBUG("TLSOpts ~p ~n",[TLSOpts]),
     {ok, open_socket,
      #state{use_v10 = UseV10, tls = TLS,
 	    tls_required = TLSRequired, tls_certverify = TLSCertverify,
@@ -239,6 +242,7 @@ open_socket(init, StateData) ->
     ?DEBUG("open_socket: ~p",
 	   [{StateData#state.myname, StateData#state.server,
 	     StateData#state.new, StateData#state.verify}]),
+	?DEBUG("StateData#state.server ~p ~n",[StateData#state.server]),
     AddrList = case
 		 idna:domain_utf8_to_ascii(StateData#state.server)
 		   of
@@ -269,7 +273,7 @@ open_socket(init, StateData) ->
 	   ?FSMTIMEOUT};
       {error, Reason} ->
 	  ?INFO_MSG("s2s connection: ~s -> ~s (remote server "
-		    "not found ,Reason )",
+		    "not found,~p )",
 		    [StateData#state.myname, StateData#state.server,Reason]),
 	  case ejabberd_hooks:run_fold(find_s2s_bridge, undefined,
 				       [StateData#state.myname,
@@ -1155,33 +1159,38 @@ get_addr_port(Server) ->
       {error, Reason} ->
 	  ?DEBUG("srv lookup of '~s' failed: ~p~n",
 		 [Server, Reason]),
-	  [{Server, outgoing_s2s_port()}];
+	  get_pg_s2s_mapped_host(Server);
       {ok, HEnt} ->
 	  ?DEBUG("srv lookup of '~s': ~p~n",
 		 [Server, HEnt#hostent.h_addr_list]),
-	  AddrList = HEnt#hostent.h_addr_list,
-	  {A1, A2, A3} = now(),
-	  random:seed(A1, A2, A3),
-	  case catch lists:map(fun ({Priority, Weight, Port,
-				     Host}) ->
-				       N = case Weight of
-					     0 -> 0;
-					     _ ->
-						 (Weight + 1) * random:uniform()
-					   end,
-				       {Priority * 65536 - N, Host, Port}
-			       end,
-			       AddrList)
-	      of
-	    SortedList = [_ | _] ->
-		List = lists:map(fun ({_, Host, Port}) ->
-                                         {list_to_binary(Host), Port}
+      case Server of
+      <<"ctrip.com">> ->
+            get_pg_s2s_mapped_host(Server);
+       _ ->
+    	  AddrList = HEnt#hostent.h_addr_list,
+    	  {A1, A2, A3} = now(),
+    	  random:seed(A1, A2, A3),
+    	  case catch lists:map(fun ({Priority, Weight, Port,
+    				     Host}) ->
+    				       N = case Weight of
+    					     0 -> 0;
+    					     _ ->
+    						 (Weight + 1) * random:uniform()
+    					   end,
+    				       {Priority * 65536 - N, Host, Port}
+    			       end,
+    			       AddrList)
+    	      of
+    	    SortedList = [_ | _] ->
+    		List = lists:map(fun ({_, Host, Port}) ->
+                                          {list_to_binary(Host), Port}
 				 end,
-				 lists:keysort(1, SortedList)),
-		?DEBUG("srv lookup of '~s': ~p~n", [Server, List]),
-		List;
-	    _ -> [{Server, outgoing_s2s_port()}]
-	  end
+	    			 lists:keysort(1, SortedList)),
+	    	?DEBUG("srv lookup of '~s': ~p~n", [Server, List]),
+	    	List;
+	       _ -> [{Server, outgoing_s2s_port()}]
+	      end
+        end
     end.
 
 srv_lookup(Server) ->
@@ -1217,9 +1226,9 @@ srv_lookup(Server, Timeout, Retries) ->
 			   "your DNS configuration.",
 			   [inet_db:res_option(nameserver), Server]),
 		srv_lookup(Server, Timeout, Retries - 1);
-	    R -> R
+		R -> ?DEBUG("srv_lookup : [ ~p ] ~n",[R]), R
 	  end;
-      {ok, _HEnt} = R -> R
+      {ok, _HEnt} = R -> ?DEBUG("R : [ ~p ] ~n",[R]), R
     end.
 
 test_get_addr_port(Server) ->
@@ -1372,3 +1381,13 @@ fsm_limit_opts() ->
         undefined -> [];
         N -> [{max_queue, N}]
     end.
+
+get_pg_s2s_mapped_host(Server) ->
+	case catch ets:lookup(domain_to_host,Server) of
+	[Mapperd] when is_record(Mapperd,s2s_mapperd) ->
+		Domain_lists = Mapperd#s2s_mapperd.host_lists,
+		lists:flatmap(fun(Host_info) ->
+			[{Host_info#host_info.host,Host_info#host_info.port}] end,Domain_lists);
+	 _ ->
+		[{Server, outgoing_s2s_port()}]
+	  end.

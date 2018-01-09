@@ -16,7 +16,7 @@
 
 set -o errexit
 
-DIR=/home/q/ejabberd14.07/sbin
+DIR=/home/q/ejabberd.14.07.1/sbin
 CTL="$DIR"/ejabberdctl
 USER=root
 

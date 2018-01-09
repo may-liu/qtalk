@@ -293,16 +293,46 @@ terminate(_Reason, _State) -> ok.
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 do_route(From, To, Packet) ->
-    ?DEBUG("local route~n\tfrom ~p~n\tto ~p~n\tpacket "
-	   "~P~n",
-	   [From, To, Packet, 8]),
+%    ?DEBUG("local route~n\tfrom ~p~n\tto ~p~n\tpacket "
+%	   "~P~n",
+%  [From, To, Packet, 8]),
     if To#jid.luser /= <<"">> ->
-	   ejabberd_sm:route(From, To, Packet);
+		#xmlel{name = Name,attrs = Attrs} = Packet,
+		case Name of
+		<<"message">> ->
+			Type = xml:get_attr_s(<<"type">>, Attrs),
+			if Type =:= <<"chat">> orelse Type =:= <<"normal">> ->
+			%%	case catch privacy_send_authorization(From,To) of
+				case true of
+				true ->
+					ejabberd_sm:route(From, To, Packet);
+				A ->
+					?INFO_MSG("Packet refused ~p, ~p,~p ~n",[A,From,To]),
+					ok
+				end;
+			true ->
+				ejabberd_sm:route(From, To, Packet)
+			end;
+		_ ->
+			ejabberd_sm:route(From, To, Packet)
+		end;
+%		case catch ejabberd_hooks:run_fold(privacy_send_authorization,From#jid.lserver,true,[From,To,Packet]) of
+%		false ->
+%			ok;
+%		_ ->
+%	   		ejabberd_sm:route(From, To, Packet);
+%		end;
        To#jid.lresource == <<"">> ->
-	   #xmlel{name = Name} = Packet,
+	   #xmlel{name = Name,attrs = Attrs} = Packet,
 	   case Name of
 	     <<"iq">> -> process_iq(From, To, Packet);
-	     <<"message">> -> ok;
+	     <<"message">> -> 
+			case xml:get_attr_s(<<"type">>, Attrs) of
+			<<"readmark">> ->
+				readmark:readmark_message(From,To,Packet);
+			_ ->
+				ok
+			end;
 	     <<"presence">> -> ok;
 	     _ -> ok
 	   end;
@@ -360,3 +390,14 @@ cancel_timer(TRef) ->
 	  receive {timeout, TRef, _} -> ok after 0 -> ok end;
       _ -> ok
     end.
+
+privacy_send_authorization(From,To) ->
+	From_user = jlib:jid_to_string({From#jid.luser,From#jid.lserver,<<"">>}),
+	To_user = jlib:jid_to_string({To#jid.luser,To#jid.lserver,<<"">>}),
+	Shield_key = list_to_binary(lists:sort([From_user,To_user])),
+	case catch ets:lookup(shield_user,Shield_key) of
+	[{Shield_key,_}] ->
+		false;
+	_ ->
+		true
+	end.

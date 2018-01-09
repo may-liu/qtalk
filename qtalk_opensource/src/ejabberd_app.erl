@@ -65,6 +65,7 @@ start(normal, _Args) ->
     %ejabberd_debug:fprof_start(),
     maybe_add_nameservers(),
     start_modules(),
+	%%mod_hash_nodes 
     ejabberd_listener:start_listeners(),
     ?INFO_MSG("ejabberd ~s is started in the node ~p", [?VERSION, node()]),
     Sup;
@@ -75,10 +76,10 @@ start(_, _) ->
 %% This function is called when an application is about to be stopped,
 %% before shutting down the processes of the application.
 prep_stop(State) ->
-    ejabberd_listener:stop_listeners(),
-    stop_modules(),
-    ejabberd_admin:stop(),
-    broadcast_c2s_shutdown(),
+    catch ejabberd_listener:stop_listeners(),
+    catch stop_modules(),
+    catch ejabberd_admin:stop(),
+    catch broadcast_c2s_shutdown(),
     timer:sleep(5000),
     State.
 
@@ -150,7 +151,7 @@ start_modules() ->
 
 %% Stop all the modules in all the hosts
 stop_modules() ->
-    lists:foreach(
+    catch lists:foreach(
       fun(Host) ->
               Modules = ejabberd_config:get_option(
                           {modules, Host},

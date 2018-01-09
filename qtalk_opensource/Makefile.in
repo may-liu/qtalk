@@ -68,7 +68,25 @@ else
   INIT_USER=$(INSTALLUSER)
 endif
 
-all: deps src
+all: version deps src
+
+version:
+	@if [ -d .git ]; then \
+	( \
+		echo -n '-define(REVISION_NUM, "'; \
+		(echo -n `git show -s --pretty=format:%h`:`git log --oneline | wc -l`); \
+		m=`git status|grep 'modified:'|wc -l`; \
+		echo -n $(shell if [ `git status|grep 'modified:'|wc -l` -gt 0 ]; then echo "M"; fi); \
+		echo '").'; \
+		echo -n '-define(GIT_REMOTE_URL, "'; \
+		(echo -n `git remote -v|grep push`|sed 's/origin //'|sed 's/ (push)//'); \
+		echo '").'; \
+		echo -n '-define(BUILD_TIME, "'; (echo -n `date "+%F %T"`); echo '").'; \
+		echo -n '-define(BUILD_BY, "'; (echo -n `whoami`); echo '").'; \
+		echo -n '-define(BUILD_AT, "'; (echo -n `hostname`); echo '").'; \
+	) > ./include/ejabberd_ver.hrl; \
+	echo "Marking version revision to ejabberd.ver..."; \
+	fi;
 
 deps: deps/.got
 

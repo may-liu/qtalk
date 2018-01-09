@@ -29,6 +29,16 @@
 -define(NS_REGISTER, <<"jabber:iq:register">>).
 -define(NS_SEARCH, <<"jabber:iq:search">>).
 -define(NS_ROSTER, <<"jabber:iq:roster">>).
+-define(NS_VER_FRI_MODE, <<"jabber:iq:verify_friend_mode">>).
+-define(NS_VER_FRI, <<"jabber:x:verify_friend">>).
+-define(NS_DEL_FRI, <<"jabber:x:delete_friend">>).
+-define(NS_GET_FRI, <<"jabber:x:get_friend">>).
+-define(NS_DEL_INVITE, <<"jabber:x:delete_invite">>).
+-define(NS_RECV_LIMIT, <<"jabber:x:recv_msg_limit">>).
+-define(NS_MASK_USER, <<"jabber:x:mask_user">>).
+-define(NS_VIRTUAL_USER, <<"jabber:x:virtual_user">>).
+-define(NS_UPDATE_PRES_A, <<"jabber:x:update_pres_a">>).
+-define(NS_VER_MAN_AUTH, <<"jabber:x:manual_authentication">>).
 -define(NS_ROSTER_VER,
 	<<"urn:xmpp:features:rosterver">>).
 -define(NS_PRIVACY, <<"jabber:iq:privacy">>).
@@ -52,6 +62,7 @@
 -define(NS_STATS,
 	<<"http://jabber.org/protocol/stats">>).
 -define(NS_MUC, <<"http://jabber.org/protocol/muc">>).
+-define(NS_CREATE_MUC, <<"http://jabber.org/protocol/create_muc">>).
 -define(NS_MUC_USER,
 	<<"http://jabber.org/protocol/muc#user">>).
 -define(NS_MUC_ADMIN,
@@ -60,10 +71,22 @@
 	<<"http://jabber.org/protocol/muc#owner">>).
 -define(NS_MUC_UNIQUE,
 	<<"http://jabber.org/protocol/muc#unique">>).
+-define(NS_MUC_ONLINE_REGISTER,
+	<<"http://jabber.org/protocol/muc#online_register">>).
+-define(NS_MUC_IQ_MEMBER,
+	<<"http://jabber.org/protocol/muc#member">>).
 -define(NS_MUC_INVITE,
 	<<"http://jabber.org/protocol/muc#invite">>).
+-define(NS_MUC_INVITE_V2,
+	<<"http://jabber.org/protocol/muc#invite_v2">>).
+-define(NS_MUC_AUTHORITY,
+	<<"http://jabber.org/protocol/muc#authority">>).
 -define(NS_MUC_REGISTER,
 	<<"http://jabber.org/protocol/muc#register">>).
+-define(NS_MUC_DEL_USER,
+	<<"http://jabber.org/protocol/muc#del_user">>).
+-define(NS_MUC_ADD_USER,
+	<<"http://jabber.org/protocol/muc#add_user">>).
 -define(NS_MUC_SET_REGISTER,
 	<<"http://jabber.org/protocol/muc#set_register">>).
 -define(NS_MUC_VCARD_UPDATE,
@@ -74,6 +97,10 @@
 	<<"http://jabber.org/protocol/muc#muc_user_subscribe">>).
 -define(NS_USER_MUCS,
 	<<"http://jabber.org/protocol/muc#user_mucs">>).
+-define(NS_PRESENCE_ALL,
+	<<"http://jabber.org/protocol/muc#presence_all">>).
+-define(NS_PRESENCE_ALL_V2,
+	<<"http://jabber.org/protocol/muc#presence_all_v2">>).
 -define(NS_SUBPUBSUB,
 	<<"http://jabber.org/protocol/subscription">>).
 -define(NS_PUBSUB,
@@ -175,3 +202,4 @@
 -define(NS_STREAM_MGMT_3,  <<"urn:xmpp:sm:3">>).
 -define(NS_CHECK_VERSION,  <<"jabber:iq:check-version">>).
 -define(NS_BLOCK, <<"urn:xmpp:block">>).
+-define(CONFIG_XMPP_TIME_KEY, <<"config:xmpp:time_key">>).

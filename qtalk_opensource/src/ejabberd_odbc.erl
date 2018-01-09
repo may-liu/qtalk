@@ -53,6 +53,8 @@
 -export([connecting/2, connecting/3,
 	 session_established/2, session_established/3]).
 
+-export([get_pgsql_config/3]).
+
 -include("ejabberd.hrl").
 -include("logger.hrl").
 
@@ -160,7 +162,7 @@ keep_alive(PID) ->
 sql_query_t(Query) ->
     QRes = sql_query_internal(Query),
     case QRes of
-      {error, Reason} -> throw({aborted, Reason});
+      {error, Reason} ->throw({aborted, Reason});
       Rs when is_list(Rs) ->
 	  case lists:keysearch(error, 1, Rs) of
 	    {value, {error, Reason}} -> throw({aborted, Reason});
@@ -418,11 +420,11 @@ outer_transaction(F, NRestarts, _Reason) ->
 	  sql_query_internal(<<"rollback;">>),
 	  outer_transaction(F, NRestarts - 1, Reason);
       {aborted, Reason} when NRestarts =:= 0 ->
-	  ?ERROR_MSG("SQL transaction restarts exceeded~n** "
+	  ?ERROR_MSG("SQL transaction restarts exceeded~n**  ~p"
 		     "Restarts: ~p~n** Last abort reason: "
 		     "~p~n** Stacktrace: ~p~n** When State "
 		     "== ~p",
-		     [?MAX_TRANSACTION_RESTARTS, Reason,
+		     [F,?MAX_TRANSACTION_RESTARTS, Reason,
 		      erlang:get_stacktrace(), get(?STATE_KEY)]),
 	  sql_query_internal(<<"rollback;">>),
 	  {aborted, Reason};
@@ -589,6 +591,15 @@ db_opts(Host) ->
     Server = ejabberd_config:get_option({odbc_server, Host},
                                         fun iolist_to_binary/1,
                                         <<"localhost">>),
+
+%	Server = 
+%		case get_pgsql_config(odbc_server,Host,<<"localhost">>) of
+%		<<"localhost">> ->
+%			ejabberd_config:get_option({odbc_server, Host},fun iolist_to_binary/1,<<"localhost">>);
+%		S ->
+%			S
+%		end,	
+
     case Type of
         odbc ->
             [odbc, Server];
@@ -609,6 +620,30 @@ db_opts(Host) ->
             Pass = ejabberd_config:get_option({odbc_password, Host},
                                               fun iolist_to_binary/1,
                                               <<"">>),
+
+%	DB = 
+%		case get_pgsql_config(odbc_database,Host,<<"null">>) of
+%		<<"null">> ->
+%			ejabberd_config:get_option({odbc_database, Host},fun iolist_to_binary/1,<<"ejabberd">>);
+%		D ->
+%			D
+%		end,
+
+%	User = 
+%		case get_pgsql_config(odbc_username,Host,<<"null">>) of
+%		<<"null">> ->
+%			ejabberd_config:get_option({odbc_username, Host},fun iolist_to_binary/1,<<"ejabberd">>);
+%		U ->
+%			U
+%		end,
+%	Pass =
+%		case get_pgsql_config(odbc_password,Host,<<"">>) of
+%		<<"">> ->
+%			ejabberd_config:get_option({odbc_password, Host},fun iolist_to_binary/1,<<"">>);
+%		P ->
+%			P
+%		end,
+
             [Type, Server, Port, DB, User, Pass]
     end.
 
@@ -622,3 +657,24 @@ fsm_limit_opts() ->
       N when is_integer(N) -> [{max_queue, N}];
       _ -> []
     end.
+
+get_pgsql_config(Key,Host,Default) ->
+	case ejabberd_config:get_option(pgsql, fun(LS)->LS end) of
+	undefined ->
+		Default;
+	Ls -> 
+	 	lists:foldl(fun(L,Acc) ->
+				case Host == proplists:get_value(hosts,L) of
+				true ->
+					case proplists:get_value(Key,L) of 
+					undefined ->
+						Default;
+					Val ->
+						Val
+					end;	
+				false ->
+					Acc 
+				end end,Default,Ls)
+	end.
+
+

@@ -105,6 +105,14 @@ init([]) ->
 	 infinity,
 	 supervisor,
 	 [ejabberd_tmp_sup]},
+     Protobuf_ReceiverSupervisor =
+	{ejabberd_protobuf_receiver_sup,
+	 {ejabberd_tmp_sup, start_link,
+	  [ejabberd_protobuf_receiver_sup, ejabberd_protobuf_receiver]},
+	 permanent,
+	 infinity,
+	 supervisor,
+	 [ejabberd_tmp_sup]},
     C2SSupervisor =
 	{ejabberd_c2s_sup,
 	 {ejabberd_tmp_sup, start_link, [ejabberd_c2s_sup, ejabberd_c2s]},
@@ -178,6 +186,7 @@ init([]) ->
 	   Local,
 	   Captcha,
 	   ReceiverSupervisor,
+	   Protobuf_ReceiverSupervisor,
 	   C2SSupervisor,
 	   S2SInSupervisor,
 	   S2SOutSupervisor,

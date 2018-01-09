@@ -63,6 +63,7 @@ init([Host]) ->
                  {odbc_pool_size, Host},
                  fun(I) when is_integer(I), I>0 -> I end,
                  ?DEFAULT_POOL_SIZE),
+
     StartInterval = ejabberd_config:get_option(
                       {odbc_start_interval, Host},
                       fun(I) when is_integer(I), I>0 -> I end,
@@ -84,7 +85,9 @@ get_pids(Host) ->
 get_random_pid(Host) ->
     case get_pids(Host) of
       [] -> none;
-      Pids -> lists:nth(erlang:phash(os:timestamp(), length(Pids)), Pids)
+      Pids -> Pid = lists:nth(erlang:phash(os:timestamp(), length(Pids)), Pids),
+	  		?DEBUG("pgsql Pid ~p ~n",[Pid]),
+			Pid
     end.
 
 add_pid(Host, Pid) ->

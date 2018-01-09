@@ -33,6 +33,7 @@
 	 connect/4,
 	 starttls/2,
 	 starttls/3,
+     starttls/4,
 	 compress/1,
 	 compress/2,
 	 reset_stream/1,
@@ -117,16 +118,34 @@ start(Module, SockMod, Socket, Opts) ->
 		end
 	  end;
       independent -> ok;
+	  protobuf ->
+	  	bind_protobuf_receiver(Module, SockMod, Socket, Opts);
       raw ->
-	  case Module:start({SockMod, Socket}, Opts) of
-	    {ok, Pid} ->
-		case SockMod:controlling_process(Socket, Pid) of
-		  ok -> ok;
-		  {error, _Reason} -> SockMod:close(Socket)
-		end;
-	    {error, _Reason} -> SockMod:close(Socket)
-	  end
-    end.
+        case Module:start({SockMod, Socket}, Opts) of
+        {ok, Pid} ->
+			case SockMod:controlling_process(Socket, Pid) of
+			ok -> ok;
+			{error, _Reason} -> SockMod:close(Socket)
+	   		end;
+		{error, _Reason} -> SockMod:close(Socket)
+		end
+	end.
+			
+%%	  case Module:start({SockMod, Socket}, Opts) of
+%%	    {ok, Pid1} ->
+%	case true of
+%		true ->
+%		{ok,Pid} = mod_bcd_socket_service:start_link(Socket,Opts),
+%%		{ok,Pid} = mod_bcd_socket:start_child(Socket,Opts),
+%		case SockMod:controlling_process(Socket, Pid) of
+%		  ok -> ?DEBUG("pid ~p ~n",[Pid]),
+%		   mod_bcd_socket_service:become_controller(Pid, Pid),
+%		  	ok;
+%		  {error,Reason} -> ?DEBUG("Sokcet ~p ,Reason ~n",[Socket,Reason]),SockMod:close(Socket)
+%		end;
+%	    {error, Reason} -> ?DEBUG("Reason ~p ~n",[Reason]),SockMod:close(Socket)
+%	  end
+ %   end.
 
 connect(Addr, Port, Opts) ->
     connect(Addr, Port, Opts, infinity).
@@ -145,7 +164,7 @@ connect(Addr, Port, Opts, Timeout) ->
 		{ok, SocketData};
 	    {error, _Reason} = Error -> gen_tcp:close(Socket), Error
 	  end;
-      {error, _Reason} = Error -> Error
+      {error, _Reason} = Error -> ?DEBUG("Eorr ~p ~n",[Error]),Error
     end.
 
 starttls(SocketData, TLSOpts) ->
@@ -158,6 +177,16 @@ starttls(SocketData, TLSOpts, Data) ->
     ejabberd_receiver:starttls(SocketData#socket_state.receiver, TLSSocket),
     send(SocketData, Data),
     SocketData#socket_state{socket = TLSSocket, sockmod = p1_tls}.
+
+starttls('probuff',SocketData, TLSOpts, Data) ->
+    {ok, TLSSocket} = p1_tls:tcp_to_tls(SocketData#socket_state.socket, TLSOpts),
+    ejabberd_protobuf_receiver:starttls(SocketData#socket_state.receiver, TLSSocket),
+    send(SocketData, Data),
+    ?DEBUG("Send Data ~p ~n",[Data]),
+    SocketData#socket_state{socket = TLSSocket, sockmod = p1_tls};
+starttls(_,SocketData, TLSOpts, Data) ->
+    starttls(SocketData, TLSOpts, Data).
+
 
 compress(SocketData) -> compress(SocketData, undefined).
 
@@ -249,3 +278,28 @@ peername(#socket_state{sockmod = SockMod,
 %% Internal functions
 %%====================================================================
 %====================================================================
+bind_protobuf_receiver(Module, SockMod, Socket, Opts) ->
+	MaxStanzaSize =
+   		case lists:keysearch(max_stanza_size, 1,Opts) of
+   		 {value, {_, Size}} -> Size;
+   		 _ -> infinity
+		  end,
+	 RecPid = ejabberd_protobuf_receiver:start(Socket,SockMod,none,MaxStanzaSize),
+	 ReceiverMod = ejabberd_protobuf_receiver,
+	 SocketData = #socket_state{sockmod = SockMod,socket = Socket, receiver = RecPid},
+	 case Module:start({?MODULE, SocketData}, Opts) of
+	 {ok, Pid} ->
+	 	case SockMod:controlling_process(Socket, RecPid) of
+		 ok -> ok;
+		{error, _Reason} -> SockMod:close(Socket)
+	 	end,
+	 	ReceiverMod:become_controller(RecPid, Pid);
+	{error, _Reason} ->
+		SockMod:close(Socket),
+		case ReceiverMod of
+		ejabberd_protobuf_receiver ->
+			 ReceiverMod:close(RecPid);
+		_ ->
+			ok
+		end
+	end.

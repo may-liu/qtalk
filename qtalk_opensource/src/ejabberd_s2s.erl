@@ -47,6 +47,8 @@
 %% ejabberd API
 -export([get_info_s2s_connections/1, transform_options/1]).
 
+-export([update_s2s_mapperd_host/1]).
+
 -include("ejabberd.hrl").
 -include("logger.hrl").
 
@@ -78,6 +80,9 @@
 
 -record(temporarily_blocked, {host = <<"">>     :: binary(),
                               timestamp = now() :: erlang:timestamp()}).
+
+-record(s2s_mapperd,{domain = <<"">>,host_lists = []}).
+-record(host_info,{host,port,priority,weight}).
 
 -type temporarily_blocked() :: #temporarily_blocked{}.
 
@@ -260,6 +265,10 @@ init([]) ->
     mnesia:subscribe(system),
     ejabberd_commands:register_commands(commands()),
     mnesia:create_table(temporarily_blocked, [{ram_copies, [node()]}, {attributes, record_info(fields, temporarily_blocked)}]),
+	Server = lists:nth(1,ejabberd_config:get_myhosts()),
+	catch ets:new(domain_to_host, [set, named_table, public, {keypos, 2},{write_concurrency, true}, {read_concurrency, true}]),
+	catch update_s2s_mapperd_host(Server),
+
     {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -292,6 +301,9 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info({mnesia_system_event, {mnesia_down, Node}}, State) ->
     clean_table_from_bad_node(Node),
+    {noreply, State};
+handle_info({update_s2s_mapperd_host,Server},  State) ->
+	update_s2s_mapperd_host(Server),
     {noreply, State};
 handle_info({route, From, To, Packet}, State) ->
     case catch do_route(From, To, Packet) of
@@ -342,19 +354,40 @@ do_route(From, To, Packet) ->
 	   "~P~n",
 	   [From, To, Packet, 8]),
     case find_connection(From, To) of
-      {atomic, Pid} when is_pid(Pid) ->
-	  ?DEBUG("sending to process ~p~n", [Pid]),
-	  #xmlel{name = Name, attrs = Attrs, children = Els} =
-	      Packet,
-	  NewAttrs =
-	      jlib:replace_from_to_attrs(jlib:jid_to_string(From),
+	{atomic, Pid} when is_pid(Pid)  ->
+		%%case erlang:process_info(Pid,[registered_name]) =/= undefined of
+		case check_pid_alive(Pid) of
+		true ->
+			  ?DEBUG("sending to process ~p~n", [Pid]),
+			  #xmlel{name = Name, attrs = Attrs, children = Els} =    Packet,
+			  NewAttrs =
+		      jlib:replace_from_to_attrs(jlib:jid_to_string(From),
 					 jlib:jid_to_string(To), Attrs),
-	  #jid{lserver = MyServer} = From,
-	  ejabberd_hooks:run(s2s_send_packet, MyServer,
-			     [From, To, Packet]),
-	  send_element(Pid,
-		       #xmlel{name = Name, attrs = NewAttrs, children = Els}),
-	  ok;
+			  #jid{lserver = MyServer} = From,
+			  NewPacket  = #xmlel{name = Name, attrs = NewAttrs, children = Els},
+			  NewPacket2 = 
+			  	case Name of 
+				<<"message">> ->
+	  				insert_other_domain_msg(MyServer,From,To,NewPacket);
+				_ ->
+				NewPacket
+				end,
+			  ejabberd_hooks:run(s2s_send_packet, MyServer,  [From, To, NewPacket2]),
+			  send_element(Pid, NewPacket2),
+%%			       #xmlel{name = Name, attrs = NewAttrs, children = Els}),
+			  ok;
+	  	_ ->
+			#jid{lserver = MyServer} = From,
+			#jid{lserver = Server} = To,
+	     	FromTo = {MyServer, Server},
+			case catch mnesia:dirty_match_object(s2s,#s2s{fromto = FromTo, pid = Pid, _ = '_'}) of
+			[S2s] ->
+				F = fun () ->	mnesia:delete_object(S2s) end,
+				mnesia:transaction(F);
+			_ ->
+				ok
+			end
+		end;
       {aborted, _Reason} ->
 	  case xml:get_tag_attr_s(<<"type">>, Packet) of
 	    <<"error">> -> ok;
@@ -771,3 +804,65 @@ match_labels([DL | DLabels], [PL | PLabels]) ->
 	  end;
       false -> false
     end.
+
+update_s2s_mapperd_host(Server) ->
+	case catch ejabberd_odbc:sql_query(Server,[<<"select domain,host,port,priority,weight from s2s_mapped_host">>]) of 
+    {selected, _ , SRes} when is_list(SRes) ->
+		catch ets:delete_all_objects(domain_to_host),
+		lists:foreach(fun([Domain,Host,Port,Priority,Weight]) ->	
+			case ets:lookup(domain_to_host,Domain) of
+			[Mapperd] when is_record(Mapperd,s2s_mapperd) ->
+				Host_info = #host_info{host = Host,port = binary_to_integer(Port),priority = Priority ,weight = Weight},
+				case lists:member(Host_info,Mapperd#s2s_mapperd.host_lists) of
+				true ->
+					ok;
+				_ ->
+					New_lists = lists:append([Host_info],Mapperd#s2s_mapperd.host_lists),
+					ets:insert(domain_to_host,#s2s_mapperd{domain = Domain,host_lists = New_lists})
+				end;
+			_ ->
+				Host_info = #host_info{host = Host,port = binary_to_integer(Port),priority = Priority ,weight = Weight},
+				ets:insert(domain_to_host,#s2s_mapperd{domain = Domain,host_lists = [Host_info]})
+			end end,SRes);
+	_ ->
+		ok
+	end.
+
+insert_other_domain_msg(Server,From,To,Packet) ->
+	#xmlel{name = Name, attrs = Attrs, children =  Els} = Packet,
+	Mtype = xml:get_attr_s(<<"type">>, Attrs),
+	case  Mtype == <<"normal">> orelse Mtype == <<"chat">> of
+	true ->
+		Reply = xml:get_attr_s(<<"auto_reply">>, Attrs),
+		Mbody = xml:get_subtag_cdata(Packet, <<"body">>),
+		Delay = xml:get_subtag_cdata(Packet,<<"delay">>),
+		case Mbody =/= <<>> andalso Delay =/= <<"Offline Storage">> of
+		true ->
+			Now = mod_time:deal_timestamp(os:timestamp()),
+			Msg_id = xml:get_tag_attr_s(<<"id">>,xml:get_subtag(Packet,<<"body">>)),
+			Bid = 
+				case Msg_id of 
+				<<"">> ->
+					list_to_binary("add" ++ integer_to_list(mod_time:get_exact_timestamp()));
+				_ ->
+					Msg_id
+				end,
+			ejabberd_sm:insert_chat_msg(Server,From#jid.user,To#jid.user,From#jid.lserver,To#jid.lserver, xml:element_to_binary(
+				 #xmlel{name = Name, attrs = Attrs, children =  Els ++
+					[ejabberd_sm:timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(Now))]}),Mbody,Bid,Now),
+			ejabberd_c2s:add_body_id(Packet,Bid);	
+		_ ->
+			Packet
+		end;
+	_ ->
+		Packet
+	end.
+
+check_pid_alive(Pid) ->
+	if node() =:= node(Pid) ->
+		is_process_alive(Pid);
+	true ->
+		true
+	end.
+
+    

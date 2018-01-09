@@ -1,100 +1,109 @@
 %% Feel free to use, reuse and abuse the code in this file.
 
 -module(http_get_user_status).
-
 -export([init/3]).
 -export([handle/2]).
 -export([terminate/3]).
-
 -include("ejabberd.hrl").
 -include("logger.hrl").
--include("ejabberd_extend.hrl").
 
 init(_Transport, Req, []) ->
 	{ok, Req, undefined}.
 
 handle(Req, State) ->
-	{Method, _} = cowboy_req:method(Req),
+	{Method, Req2} = cowboy_req:method(Req),
 	case Method of 
 	<<"GET">> ->
-		{ok, Req2} = get_echo(Method,Req),
-		{ok, Req2, State};
+	    {Host,Req3} =  cowboy_req:host(Req),
+		{ok, Req4} = echo(<<"No Get Method!">>,Req),
+		{ok, Req4, State};
 	<<"POST">> ->
 		HasBody = cowboy_req:has_body(Req),
-		{ok, Req2} = post_echo(Method, HasBody, Req),
-		{ok, Req2, State};
+		{ok, Req3} = post_echo(Method, HasBody, Req),
+		{ok, Req3, State};
 	_ ->
-		{ok,Req2} = echo(undefined, Req),
-		{ok, Req2, State}
+		{ok,Req3} = echo(undefined, Req),
+		{ok, Req3, State}
 	end.
-    	
-get_echo(<<"GET">>,Req) ->
-		Res = 
-			case http_utils:verify_user_key(Req) of
-			true ->
-       			{Users,_} = cowboy_req:qs_val(<<"users">>, Req),
-				case Users of
-				undefined ->
-					http_utils:gen_result(false,1, <<"No users list">>);	
-				_ ->
-        			http_utils:gen_result(true,0,get_user_status(Users))
-				end;
-			_ ->
-				http_utils:gen_result(false, 2, <<"Not found Mac_Key">>)
-			end,
-		cowboy_req:reply(200, [
-			{<<"content-type">>, <<"text/plain; charset=utf-8">>}
-		], Res,Req);
-get_echo(_,Req) ->
-	cowboy_req:reply(405, Req).
-
-post_echo(<<"POST">>, true, Req) ->
+post_echo(<<"POST">>,true,Req) ->	
+	{ok, PBody, _} = cowboy_req:body(Req),
+    {Host,_} =  cowboy_req:host(Req),
 	Header = cowboy_req:get(headers,Req),
-	{ok, Body, _} = cowboy_req:body(Req),
-	Users = 
+	Body = 
 		case catch proplists:get_value(<<"content-encoding">>,Header) of 
 		<<"gzip">> ->
-			PBody = cow_qs:parse_qs(zlib:gunzip(Body)),
-			proplists:get_value(<<"users">>, PBody);
+			zlib:gunzip(PBody);
 		_ ->
-			PBody = cow_qs:parse_qs(Body),
-			proplists:get_value(<<"users">>, PBody)
-		end,
-	Res =
-		case Users of
-		undefined ->
-			http_utils:gen_result(false, 1, <<"No users list">>);	
+			PBody
+		end,	
+	Servers = ejabberd_config:get_myhosts(),
+	LServer = lists:nth(1,Servers),
+	Res = 
+		case catch rfc4627:decode(Body) of
+		{ok,{obj,Args},[]}  ->
+			case proplists:get_value("type",Args) of
+			<<"exact">> ->
+				get_exact_user_status(LServer,Args);
+			_ ->
+				http_utils:gen_result(false, <<"1">>, <<"no allow get user status">>,[])
+			end;
 		_ ->
-			http_utils:gen_result(true,0,get_user_status(Users))
-		end,
-		cowboy_req:reply(200, [{<<"content-type">>, <<"text/plain; charset=utf-8">>}], Res, Req);
+			case Body of 
+			<<"require=all">> ->
+				get_user_status(LServer,Body);
+			_ ->
+				http_utils:gen_result(false, <<"1">>, <<"no allow get user status">>,[])
+			end
+		end,	
+	cowboy_req:reply(200, [{<<"content-type">>, <<"text/json; charset=utf-8">>}], Res, Req);
 post_echo(<<"POST">>, false, Req) ->
-	cowboy_req:reply(400, [], <<"Missing Post body.">>, Req);
+	cowboy_req:reply(400, [], http_utils:gen_result(false, <<"-1">>,<<"Missing Post body.">>,<<"">>), Req);
 post_echo(_, _, Req) ->
 	cowboy_req:reply(405, Req).
 										
 
 echo(undefined, Req) ->
-    cowboy_req:reply(400, [], <<"Missing parameter.">>, Req);
+	cowboy_req:reply(400, [], http_utils:gen_result(false, <<"-1">>,<<"Missing Post body.">>,<<"">>), Req);
 echo(Echo, Req) ->
     cowboy_req:reply(200, [
 			        {<<"content-type">>, <<"text/plain; charset=utf-8">>}
-	    			    ], Echo, Req).
+	    			    ], http_utils:gen_result(true, <<"0">>,Echo,<<"">>), Req).
 
 terminate(_Reason, _Req, _State) ->
 	ok.
 
-get_user_status(UserBList) ->
-	UserStr = erlang:binary_to_list(UserBList),
-	UserList = string:tokens(UserStr,","),
-	UserStatus =
-		lists:map(fun(User) ->
-			BUser = list_to_binary(User),
-				{obj, [{"U", BUser},{"S",
-					case ejabberd_public:user_status(BUser) of
-					0 ->
-					    0;
-					_ ->
-					    6
-					end}]}  end, UserList), 
-	{obj,[{"data",UserStatus}]}.
+get_user_status(LServer,Body) ->
+	Res = 
+		lists:map(fun({N,J}) ->
+			{obj,[{"U",J},{"S",
+				case ejabberd_sm:get_user_away_rescources(J,LServer) of
+				[] ->
+					6;
+				[<<"none">>] ->
+					0;
+				_ ->
+					1
+				end}]} end,	
+				case catch ets:tab2list(nick_name) of
+				L when is_list(L) ->
+					L;
+				_ ->
+					[]
+				end),
+		http_utils:gen_result(true, <<"1">>, <<"">>,Res).
+
+get_exact_user_status(LServer,Body) ->
+	case proplists:get_value("users",Body) of
+	undefined ->
+		http_utils:gen_result(false, <<"1">>, <<"not find users">>,[]);
+	Users ->
+		Res = 
+			lists:map(fun({obj,[{"u",U}]}) ->
+			case ejabberd_sm:get_user_resources(U,LServer) of
+			[] ->
+				{obj,[{u,U},{s,0}]};
+			_ ->
+				{obj,[{u,U},{s,6}]}
+			end end,Users),
+		http_utils:gen_result(true,<<"0">>,<<"">>,Res)
+	end.

@@ -55,7 +55,7 @@ loglevel: 4
 ##
 log_rotate_size: 10485760
 log_rotate_date: ""
-log_rotate_count: 2
+log_rotate_count: 1
 
 ##
 ## overload protection: If you want to limit the number of messages per second
@@ -515,15 +515,6 @@ access:
 ##
 language: "en"
 
-
-##
-## http_login_url for login 
-##
-http_login_url:
-  password: "http://example/api/auth"
-  token: "https://example/api/token"
-  token1: "https://example/api2.0/token"
-
 ##
 ## Set a different default language in a virtual host.
 ##
@@ -644,27 +635,14 @@ modules:
   mod_vcard: {}
   mod_version: {}
   mod_monitor: {}
-
-## redis client module
+  mod_check_version: {}
   mod_redis:
-    redis_server: "localhost"
-    redis_port: 6379
-    redis_password: "password"
+	redis_server: "localhost"
+	redis_port: 6379
+	redis_password: "redis123"
     redis_tab: "0,1,2"
-## http server module
-  mod_http:
-    http_port: 10052
-## preson_extend_iq,inclue:redis tkey 
-  mod_extend_iq: {}
-## async_sql module
-  mod_async_sql: {}
-## queue_module 
-  mod_msg_id_queue: {}
-## http client module
-  mod_http_client: {}
-## update module 
-  mod_update: {}
-
+  mod_http_cmd:
+	http_port: 10056
 ##
 ## Enable modules with custom options in a specific virtual host
 ##

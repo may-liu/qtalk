@@ -50,6 +50,8 @@
 	 webadmin_user/4,
 	 webadmin_user_parse_query/5]).
 
+-export([loop_monitor/3]).
+
 -include("ejabberd.hrl").
 -include("logger.hrl").
 
@@ -105,8 +107,18 @@ start(Host, Opts) ->
                        ?MODULE, webadmin_user_parse_query, 50),
     AccessMaxOfflineMsgs = gen_mod:get_opt(access_max_user_messages, Opts, fun(A) -> A end, max_user_offline_messages),
     register(gen_mod:get_module_proc(Host, ?PROCNAME),
-	     spawn(?MODULE, loop, [Host, AccessMaxOfflineMsgs])).
+	     spawn(?MODULE, loop, [Host, AccessMaxOfflineMsgs])),
+	spawn(?MODULE, loop_monitor, [whereis(gen_mod:get_module_proc(Host, ?PROCNAME)),Host, AccessMaxOfflineMsgs]).
 
+loop_monitor(Pid,Host,AccessMaxOfflineMsgs) ->
+	erlang:monitor(process, Pid),
+	receive 
+		{'DOWN', _, _, _, _} ->
+			register(gen_mod:get_module_proc(Host, ?PROCNAME),
+				spawn(?MODULE, loop, [Host, AccessMaxOfflineMsgs])),
+			loop_monitor(whereis(gen_mod:get_module_proc(Host, ?PROCNAME)),Host,AccessMaxOfflineMsgs)
+	end.
+		
 loop(Host, AccessMaxOfflineMsgs) ->
     receive
         #offline_msg{us = UserServer} = Msg ->
@@ -145,45 +157,8 @@ store_offline_msg(Host, {User, _Server}, Msgs, Len, MaxOfflineMsgs, odbc) ->
 	    end,
     if Count > MaxOfflineMsgs -> discard_warn_sender(Msgs);
        true ->
-	   Query = lists:map(fun (M) ->
-				     Username =
-					 ejabberd_odbc:escape((M#offline_msg.to)#jid.luser),
-                     FromUsername =
-                     ejabberd_odbc:escape((M#offline_msg.from)#jid.luser),
-
-                     From = M#offline_msg.from,
-				     To = M#offline_msg.to,
-				     #xmlel{name = Name, attrs = Attrs,
-					    children = Els} =
-					 M#offline_msg.packet,
-				     Attrs2 =
-					 jlib:replace_from_to_attrs(jlib:jid_to_string(From),
-								    jlib:jid_to_string(To),
-								    Attrs),
-				     Packet = #xmlel{name = Name,
-						     attrs = Attrs2,
-						     children =
-							 Els ++
-							   [jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp),
-										  utc,
-										  jlib:make_jid(<<"">>,
-												Host,
-												<<"">>),
-										  <<"Offline Storage">>),
-							    jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp))]},
-				     XML =
-					 ejabberd_odbc:escape(xml:element_to_binary(Packet)),
-					 case catch ets:lookup(mac_push_notice,{Username,FromUsername}) of
-					 [] ->
-				     	odbc_queries:add_spool_sql(FromUsername, Username, XML);
-					 [L] when is_record(L,mac_push_notice) ->
-				     	odbc_queries:add_spool_sql_no_notice(FromUsername, Username, XML);
-					 _ ->
-				     	odbc_queries:add_spool_sql(FromUsername, Username, XML)
-					 end
-			     end,
-			     Msgs),
-	   odbc_queries:add_spool(Host, Query)
+%%	   	make_offline_sql_query(Host,Msgs)
+		make_offline_http_body(Host,Msgs)
     end;
 store_offline_msg(Host, {User, _}, Msgs, Len, MaxOfflineMsgs,
 		  riak) ->
@@ -262,25 +237,25 @@ get_sm_features(Acc, _From, _To, _Node, _Lang) ->
 
 store_packet(From, To, Packet) ->
     Type = xml:get_tag_attr_s(<<"type">>, Packet),
-    if (Type /= <<"error">>) and (Type /= <<"groupchat">>) and (Type /= <<"headline">>) ->
+    if (Type /= <<"error">>) and (Type /= <<"groupchat">>) and (Type /= <<"headline">>) and (Type /= <<"typing">>) ->
 	   case has_no_storage_hint(Packet) of
 	     false ->
 		 case check_event(From, To, Packet) of
 		   true ->
-		   	   case str:str(From#jid.server,<<"conference">>) of
-			   0 ->
-		      	 #jid{luser = LUser, lserver = LServer} = To,
-		      	 TimeStamp = os:timestamp(),
-		      	 #xmlel{children = Els} = Packet,
-		      	 Expire = find_x_expire(TimeStamp, Els),
-		      	 gen_mod:get_module_proc(To#jid.lserver, ?PROCNAME) !
-			 	 #offline_msg{us = {LUser, LServer},
-					      timestamp = TimeStamp, expire = Expire,
-					      from = From, to = To, packet = Packet},
-		         stop;
-			    _ ->
-			   		ok
-		 	  	end;
+		   	   		case str:str(From#jid.server,<<"conference.">>) of
+			   		0 ->
+		      		 #jid{luser = LUser, lserver = LServer} = To,
+		      		 TimeStamp = os:timestamp(),
+		      		 #xmlel{children = Els} = Packet,
+		      		 Expire = find_x_expire(TimeStamp, Els),
+		      		 gen_mod:get_module_proc(To#jid.lserver, ?PROCNAME) !
+			 		 #offline_msg{us = {LUser, LServer},
+						      timestamp = TimeStamp, expire = Expire,
+						      from = From, to = To, packet = Packet},
+		        	 stop;
+			    	_ ->
+			   			stop
+		 	  		end;
 		   _ -> ok
 		 end;
 	     _ -> ok
@@ -305,7 +280,7 @@ has_no_storage_hint(Packet) ->
 check_event(From, To, Packet) ->
     #xmlel{name = Name, attrs = Attrs, children = Els} =
 	Packet,
-    case find_x_event(Els) of
+    case catch find_x_event(Els) of
       false -> true;
       El ->
 	  case xml:get_subtag(El, <<"id">>) of
@@ -1120,3 +1095,125 @@ import(_LServer, riak, #offline_msg{us = US, timestamp = TS} = M) ->
 		      [{i, TS}, {'2i', [{<<"us">>, US}]}]);
 import(_, _, _) ->
     pass.
+
+insert_spool_packet(Username,FromUsername,XML) ->
+	case catch ets:lookup(mac_push_notice,{Username,FromUsername}) of
+	[] ->
+		odbc_queries:add_spool_sql(FromUsername, Username, XML);
+	[L] when is_record(L,mac_push_notice) ->
+		odbc_queries:add_spool_sql_no_notice(FromUsername, Username, XML);
+	_ ->
+	   	odbc_queries:add_spool_sql(FromUsername, Username, XML)
+	end.
+
+
+make_offline_http_body(Host,Msgs) ->
+	?DEBUG("Msg ~p ~n",[Msgs]),
+	   Http_Body = lists:flatmap(fun (M) ->
+				     Username =
+					 ejabberd_odbc:escape((M#offline_msg.to)#jid.luser),
+                     FromUsername =
+                     ejabberd_odbc:escape((M#offline_msg.from)#jid.luser),
+                     FServer =
+                     ejabberd_odbc:escape((M#offline_msg.from)#jid.lserver),
+
+	                 From = M#offline_msg.from,
+					 To = M#offline_msg.to,
+			 		  #xmlel{name = Name, attrs = Attrs, children = Els} =  M#offline_msg.packet,
+				     Attrs2 =
+						 jlib:replace_from_to_attrs(jlib:jid_to_string(From),
+							 jlib:jid_to_string(To),
+							 Attrs),
+					 Packet = #xmlel{name = Name, attrs = Attrs2, children =
+								 Els ++
+								   [jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp),
+											  utc,
+											  jlib:make_jid(<<"">>,
+													Host,
+													<<"">>),
+											  <<"Offline Storage">>),
+								    jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp))]},
+				   	  XML =
+						 ejabberd_odbc:escape(xml:element_to_binary(Packet)),
+					  case xml:get_subtag(Packet, <<"body">>) of 
+					   Mbody when is_record(Mbody,xmlel) ->
+						 	Body = xml:get_subtag_cdata(Packet, <<"body">>),
+						 	case catch xml:get_tag_attr_s(<<"msgType">>,Mbody) of 
+							<<"1024">>  ->
+								[];
+							<<"">> ->
+						 		make_single_http_body(Username,FromUsername,FServer,Body,<<"1">>);
+							MsgType ->
+								?DEBUG("Msg ~p ~n",[MsgType]),
+								MsgType = xml:get_tag_attr_s(<<"msgType">>,Mbody),
+						 		make_single_http_body(Username,FromUsername,FServer,Body,MsgType)
+							end;
+						_ ->
+							[]
+						end	
+			   	  end,
+			     Msgs),
+	ejabberd_public:send_http_offline_msg(Host,rfc4627:encode(Http_Body)).
+
+make_single_http_body(To,From,FServer,Body,MsgType) ->
+	case catch ets:lookup(mac_push_notice,{To,From}) of
+	[] ->
+	 	[{obj,[{<<"username">>,To},{<<"message">>,Body},{<<"fromname">>,From},{<<"fromhost">>,FServer},
+				{<<"notice_flag">>,<<"0">>},{<<"msg_type">>,MsgType},{"type",<<"single">>},{"count",<<"1">>}]}];
+	[L] when is_record(L,mac_push_notice) ->
+	 	[{obj,[{<<"username">>,To},{<<"message">>,Body},{<<"fromname">>,From},{<<"fromhost">>,FServer},
+				{<<"notice_flag">>,<<"0">>},{<<"msg_type">>,MsgType},{"type",<<"single">>},{"count",<<"1">>}]}];
+	_ ->
+		[{obj,[{<<"username">>,To},{<<"message">>,Body},{<<"fromname">>,From},{<<"fromhost">>,FServer},
+				{<<"notice_flag">>,<<"0">>},{<<"msg_type">>,MsgType},{"type",<<"single">>},{"count",<<"1">>}]}]
+	end.
+
+
+make_offline_sql_query(Host,Msgs) ->
+	   Query = lists:map(fun (M) ->
+				     Username =
+					 ejabberd_odbc:escape((M#offline_msg.to)#jid.luser),
+                     FromUsername =
+                     ejabberd_odbc:escape((M#offline_msg.from)#jid.luser),
+
+					 case FromUsername =:=  <<"muc_recovery_warn">>  of
+					 true ->
+					 	[];
+					 _ ->
+	                     From = M#offline_msg.from,
+					     To = M#offline_msg.to,
+					     #xmlel{name = Name, attrs = Attrs,
+						    children = Els} =
+						 M#offline_msg.packet,
+					     Attrs2 =
+						 jlib:replace_from_to_attrs(jlib:jid_to_string(From),
+									    jlib:jid_to_string(To),
+									    Attrs),
+					     Packet = #xmlel{name = Name,
+							     attrs = Attrs2,
+							     children =
+								 Els ++
+								   [jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp),
+											  utc,
+											  jlib:make_jid(<<"">>,
+													Host,
+													<<"">>),
+											  <<"Offline Storage">>),
+								    jlib:timestamp_to_xml(calendar:now_to_universal_time(M#offline_msg.timestamp))]},
+				    	 XML =
+						 ejabberd_odbc:escape(xml:element_to_binary(Packet)),
+						 case xml:get_subtag(Packet, <<"body">>) of 
+						 B when is_binary(B) ->
+						 	insert_spool_packet(Username,FromUsername,XML);
+						 Mbody ->
+						 	case catch xml:get_tag_attr_s(<<"msgType">>,Mbody) /= <<"1024">> of
+							true ->
+								insert_spool_packet(Username,FromUsername,XML);
+							_ ->
+								[]
+							end
+						 end		
+					  end
+			   	  end,
+			     Msgs),
+	   odbc_queries:add_spool(Host, Query).

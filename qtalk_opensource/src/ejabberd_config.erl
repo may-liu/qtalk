@@ -629,7 +629,7 @@ get_option(Opt, F, Default) ->
         _ -> ?WARNING_MSG("Option ~p has invalid (outdated?) format. "
                           "This is likely a bug", [Opt])
     end,
-    case ets:lookup(local_config, Opt) of
+    case catch ets:lookup(local_config, Opt) of
 	[#local_config{value = Val}] ->
 	    prepare_opt_val(Opt, Val, F, Default);
         _ ->

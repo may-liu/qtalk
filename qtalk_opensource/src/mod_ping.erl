@@ -55,7 +55,10 @@
 	 handle_cast/2, handle_info/2, code_change/3]).
 
 %% Hook callbacks
--export([iq_ping/3, user_online/3, user_offline/3,user_send/3]).
+-export([iq_ping/3, user_online/3, user_offline/3,get_key/3,set_blocked_user/3,
+	 cancel_blocked_user/3,get_recent_contact/3,user_send/3,get_muc_contact/3]).
+
+-export([mac_push_notice/3,get_mac_push_notice/1,set_mac_push_notice/2,cancel_mac_push_notice/2]).
 
 -record(state,
 	{host = <<"">>,
@@ -63,6 +66,7 @@
 	 ping_interval = ?DEFAULT_PING_INTERVAL :: non_neg_integer(),
 	 timeout_action = none :: none | kill,
          timers = (?DICT):new() :: dict()}).
+-record(mac_push_notice,{user}).
 
 %%====================================================================
 %% API
@@ -207,6 +211,68 @@ iq_ping(_From, _To,
 		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
     end.
 
+get_key(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) ->
+    case {Type, SubEl} of
+      {get, #xmlel{name = <<"key">>}} ->
+	  IQ#iq{type = result, sub_el = [make_iq_key_reply(From)]};
+      _ ->
+	  IQ#iq{type = error,
+		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+    end.
+mac_push_notice(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) 	->
+	case {Type, SubEl} of
+	{get, #xmlel{name = <<"mac_push_notice">>}} ->
+		IQ#iq{type = result, sub_el = [get_mac_push_notice(From)]};
+	{set, #xmlel{name = <<"mac_push_notice">>}} ->
+		IQ#iq{type = result, sub_el = [set_mac_push_notice(From,SubEl)]};
+	{set, #xmlel{name = <<"cancel_mac_push_notice">>}} ->
+		IQ#iq{type = result, sub_el = [cancel_mac_push_notice(From,SubEl)]};
+	_ ->
+		IQ#iq{type = error,sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+	end.
+
+set_blocked_user(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) ->
+	case {Type,SubEl} of
+	  {set,#xmlel{name = <<"block_user">>}} ->
+	  	 IQ#iq{type = result, sub_el = [set_block_user(From,SubEl)]};
+      _ ->
+	  IQ#iq{type = error,
+		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+    end.
+
+cancel_blocked_user(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) ->
+	case {Type,SubEl} of
+	  {set,#xmlel{name = <<"block_user">>}} ->
+	  	 IQ#iq{type = result, sub_el = [cancel_block_user(From,SubEl)]};
+      _ ->
+	  IQ#iq{type = error,
+		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+    end.
+
+get_recent_contact(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) ->
+	case {Type,SubEl} of
+	  {get,#xmlel{name = <<"recent_contact_user">>}} ->
+	  	 IQ#iq{type = result, sub_el = [get_recent_contact_user(From)]};
+      _ ->
+	  IQ#iq{type = error,
+		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+    end.
+		
+get_muc_contact(From, _To,
+	#iq{type = Type, sub_el = SubEl} = IQ) ->
+	case {Type,SubEl} of
+	  {get,#xmlel{name = <<"recent_contact_muc">>}} ->
+	  	 IQ#iq{type = result, sub_el = [get_muc_recent_contact(From)]};
+      _ ->
+	  IQ#iq{type = error,
+		sub_el = [SubEl, ?ERR_FEATURE_NOT_IMPLEMENTED]}
+    end.
+
 user_online(_SID, JID, _Info) ->
     start_ping(JID#jid.lserver, JID).
 
@@ -245,4 +311,194 @@ cancel_timer(TRef) ->
       _ -> ok
     end.
 
+make_iq_key_reply(From) ->
+	Resource = From#jid.resource,
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	V =
+		case redis_link:hash_get(LServer,1,binary_to_list(User),binary_to_list(Resource)) of
+		{ok,undefined} ->
+			<<"">>;
+		{ok,Key} ->
+			Key;
+		_ ->
+			<<"">>
+		end,
+	#xmlel{name = <<"key">>,
+			attrs = [{<<"xmlns">>,?NS_KEY},{<<"value">>,V}],children = []}.
 
+set_block_user(From,El) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	V =
+		case xml:get_tag_attr_s(<<"jid">>,El) of
+	 	<<"">> -> 
+			<<"Null">>;
+		J ->
+			case catch ejabberd_odbc:sql_query(LServer,
+					[<<"insert into user_block_list(username,blockuser) values ('">>,User,<<"','">>,J,<<"');">>]) of
+			{updated,1} ->
+				<<"sucess">>;
+			{error,Reason}  ->
+				case  proplists:get_value(code,Reason) of
+				<<"23505">> ->
+					<<"sucess">>;
+				_ ->
+					<<"failed">>
+				end;
+			_ ->
+				<<"failed">>
+			end
+		end,
+				
+    #xmlel{name = <<"block_user">>,
+			attrs = [{<<"xmlns">>,?NS_SET_BLOCKED},
+						{<<"result">>,V}],
+			children = []}.
+
+cancel_block_user(From,El) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	V =
+		case xml:get_tag_attr_s(<<"jid">>,El) of
+	 	<<"">> -> 
+			<<"null">>;
+		J ->
+			case catch ejabberd_odbc:sql_query(LServer,
+					[<<"delete from user_block_list where username = '">>,User,<<"' and blockuser = '">>,J,<<"';">>]) of
+			{updated,1} ->
+				<<"sucess">>;
+			_ ->
+				<<"failed">>
+			end
+		end,
+    #xmlel{name = <<"block_user">>,
+			attrs = [{<<"xmlns">>,?NS_CANCEL_BLOCKED},
+						{<<"result">>,V}],
+			children = []}.
+
+get_recent_contact_user(From) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	Concat_users = 
+		case catch odbc_queries:get_concats(LServer,User) of
+		{selected, [<<"u">>], SRes} when is_list(SRes) ->
+			lists:usort(lists:concat(SRes));
+		_ ->
+			[]
+		end,
+	Block_users = 
+		case catch ejabberd_odbc:sql_query(LServer,
+			[<<"select blockuser from user_block_list where username = '">>,User,<<"';">>]) of
+		{selected, [<<"blockuser">>], SRes1} when is_list(SRes1) ->
+			lists:concat(SRes1);
+		A  ->
+			?DEBUG("A = ~p ~n",[A]),
+			[]
+		end,
+	Final_users = 
+		lists:foldl(fun(U,Acc) ->
+			case lists:member(U,Acc) of
+			true ->
+				lists:delete(U,Acc);
+			_ ->
+				Acc
+			end end,Concat_users,Block_users),
+				
+	#xmlel{name = <<"recent_contact_user">>,
+			attrs = [{<<"xmlns">>,?NS_RECENT_CONTACT},
+						{<<"conctat_user">>,list_to_binary(spell_user(Final_users))},{<<"block_user">>,list_to_binary(spell_user(Block_users))}],
+			children = []}.
+
+get_muc_recent_contact(From) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	Rooms = 
+		case catch odbc_queries:get_muc_concats(LServer,User) of
+		{selected, [<<"muc_name">>], SRes} when is_list(SRes) ->
+			lists:usort(lists:concat(SRes));
+		_ ->
+			[]
+		end,
+	#xmlel{name = <<"recent_contact_muc">>,
+			attrs = [{<<"xmlns">>,?NS_MUC_CONTACT},
+						{<<"conctat_rooms">>,list_to_binary(spell_user(Rooms))}],
+			children = []}.
+
+	
+spell_user(User) ->
+	lists:foldl(fun(U,Acc) ->
+		case Acc of 
+		[] ->
+			[U];
+		_ ->
+			lists:concat([Acc,[<<",">>,U]])
+		 end end,[],User).
+
+get_mac_push_notice(From) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	UserList = 
+		case catch ets:select(mac_push_notice, [{#mac_push_notice{user = {'$1','$2'}, _ = '_'},[{'==', '$1', User}], ['$2']}]) of
+		[] ->
+			[];
+		UL when is_list(UL) ->
+			UL;
+		_ ->
+			[]
+		end,
+    #xmlel{name = <<"mac_push_notice">>,
+			attrs = [{<<"xmlns">>,?NS_MAC_PUSH_NOTICE},
+		    {<<"shield_user">>,list_to_binary(spell_user(UserList))}],
+		    children = []}.
+
+set_mac_push_notice(From,El) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	V =
+		case xml:get_tag_attr_s(<<"jid">>,El) of
+	 	<<"">> -> 
+			<<"failed">>;
+		J ->
+			case ets:lookup(mac_push_notice,{User,J}) of
+			[] ->
+				catch ets:insert(mac_push_notice,#mac_push_notice{user = {User,J}}),
+				case catch ejabberd_odbc:sql_query(LServer,
+					[<<"insert into mac_push_notice(user_name,shield_user) values ('">>,User,<<"','">>,J,<<"');">>]) of
+				{updated, 1} -> <<"sucess">>;
+				_ -> <<"failed">>
+				end;	
+			_ ->
+				<<"sucess">>
+			end
+		end,
+    #xmlel{name = <<"mac_push_notice">>,
+			attrs = [{<<"xmlns">>,?NS_MAC_PUSH_NOTICE},
+						{<<"result">>,V}],
+			children = []}.
+
+cancel_mac_push_notice(From,El) ->
+	User = From#jid.user,
+	LServer = jlib:nameprep(From#jid.server),
+	V =
+		case xml:get_tag_attr_s(<<"jid">>,El) of
+	 	<<"">> -> 
+			<<"failed">>;
+		J ->
+			case catch ejabberd_odbc:sql_query(LServer,
+				[<<"delete from mac_push_notice where user_name = '">>,User,<<"' and shield_user = '">>,J,<<"';">>]) of
+			{updated, 1} ->
+				case ets:lookup(mac_push_notice,{User,J}) of
+				[] ->
+					<<"sucess">>;	
+				_->
+					catch ets:delete(mac_push_notice,{User,J}),
+					<<"sucess">>
+				end;
+			_ -> 
+				<<"sucess">>
+			end	
+		end,
+    #xmlel{name = <<"calcel_mac_push_notice">>,
+			attrs = [{<<"xmlns">>,?NS_MAC_PUSH_NOTICE},
+						{<<"result">>,V}]}.

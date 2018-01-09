@@ -173,6 +173,10 @@ get_user_roster(Items, US) ->
     SRItems = [#roster{usj = {U, S, {U1, S1, <<"">>}},
 		       us = US, jid = {U1, S1, <<"">>},
 		       name = get_rosteritem_name(ModVcard, U1, S1),
+%		       name = case ets:lookup(roster_name_nick,U1) of
+%			      [{_,Nm,_D}] -> Nm;
+%			      _ -> get_rosteritem_name(ModVcard, U1, S1)
+%			      end,
 		       subscription = both, ask = none, groups = GroupNames}
 	       || {{U1, S1}, GroupNames} <- dict:to_list(SRUsersRest)],
     SRItems ++ NewItems1.

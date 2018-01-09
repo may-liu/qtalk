@@ -1,7 +1,3 @@
-
-%========================================
-%		Redis处理模块
-%========================================
 -module(mod_redis).
 
 -behaviour(gen_mod).
@@ -42,6 +38,13 @@ start_link(Host,Opts) ->
 init([Host,Opts]) ->
 	StartMode = gen_mod:get_opt(redis_start_mode, Opts, fun(A) -> A end, 1),
 	PoolSize = gen_mod:get_opt(pool_size, Opts, fun(A) -> A end, ?DEFAULT_POOL_SIZE),
+	case StartMode of
+	1 ->
+		Redis_sentinel_hosts = parse_sentinel_host(gen_mod:get_opt(redis_sentinel_hosts, Opts, fun(A) -> A end, "")),
+		eredis_sentinel:start_link(Redis_sentinel_hosts);
+	_ ->
+		ok
+	end,
 	Redis_Tabs = string:tokens(binary_to_list(gen_mod:get_opt(redis_tab, Opts, fun(A) -> A end, <<"0,1,2,3">>)),","),
 	Tabs = lists:flatmap(fun(T) ->
 				case catch list_to_integer(T) of
@@ -93,12 +96,16 @@ add_pid(Host,Tab, Pid) ->
 remove_pid(Host,Tab, Pid) ->
       ets:delete_object(redis_pid,{Host,Tab,Pid}).
 
+stop_child() ->
+    lists:foreach(fun({_,_,Pid}) ->
+        gen_server:cast(Pid, stop) end,ets:tab2list(redis_pid)).
+
 stop(Host) ->
-	catch ets:delete(redis_pid),
     Proc = get_proc_name(Host),
     supervisor:terminate_child(ejabberd_sup, Proc),
     supervisor:delete_child(ejabberd_sup, Proc),
-    ok.
+    stop_child(),
+	catch ets:delete(redis_pid).
 
 get_proc_name(Host) ->
     gen_mod:get_module_proc(Host, ?PROCNAME).

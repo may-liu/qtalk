@@ -462,7 +462,19 @@ stream_established({xmlstreamelement, El}, StateData) ->
 	  {next_state, stream_established,
 	   StateData#state{timer = Timer}};
       _ ->
-	  NewEl = jlib:remove_attr(<<"xmlns">>, El),
+	  NewEl = 
+	  	case catch xml:get_attr_s(<<"xmlns">>, El#xmlel.attrs) of
+		?NS_VER_FRI ->
+			El;
+		?NS_MUC_INVITE ->
+			El;
+		?NS_MUC_DEL_REGISTER->
+			El;
+		?NS_MUC_VCARD_UPDATE ->
+			El;
+		_ ->	
+			jlib:remove_attr(<<"xmlns">>, El)
+		end,
 	  #xmlel{name = Name, attrs = Attrs} = NewEl,
 	  From_s = xml:get_attr_s(<<"from">>, Attrs),
 	  From = jlib:string_to_jid(From_s),

@@ -1,0 +1,126 @@
+#!/bin/sh
+
+#eja_sname="ejb_http_server"
+#eja_id="ejb_http_server"
+#eja_conf=""
+#eja_erlang_opt="-config config/lager -config config/ejb_http_server"
+#TODO
+LOCAL_NODE=`hostname`;
+ERL=erl
+NAME=-name
+NODE=ejb_http_server@$LOCAL_NODE
+ERL_OPTS=""
+EBIN_PATH="-pa ../ebin -pa ../deps/*/ebin"
+TEST_NODE=test@$LOCAL_NODE
+
+restart()
+{
+    if is_running; then
+        echo "ejb_http_server is restarting..."
+        stop
+        start
+    else
+        echo "ejb_http_server is stopped"
+        exit 1
+    fi
+}
+
+start()
+{
+    if is_running; then
+        echo "ejb_http_server is already started"
+        exit 1
+    else
+        echo "ejb_http_server is starting..."
+        #yaws --sname "${eja_sname}" --id "${eja_id}" --heart --daemon --conf "${eja_conf}" --erlarg "${eja_erlang_opt}"
+		sudo $ERL $NAME $NODE -detached $EBIN_PATH -s ejb_http_server -smp  enable  -hidden -config ../config/lager -config ../config/ejb_http_server
+    fi
+
+    sleep 3
+
+    if is_running; then
+        echo "ejahttp start successfully"
+    else
+        echo "ejahttp start failed"
+    fi
+}
+
+debug() 
+{
+    if is_running; then
+		sudo $ERL $NAME TEST_NODE -remsh $NODE
+	else
+		echo "ejb_http_server is stop"
+		exit 1
+	fi
+}
+
+stop()
+{
+    if is_running; then
+		PID=`ps auxww |grep -w beam |grep "name $NODE" |awk '{print $2}'`
+        if [ -n $PID ]; then
+        	kill -9 $PID
+        fi
+        echo "ejahttp is stopping..."
+    else
+        echo "ejahttp is stopped"
+        exit 1;
+    fi
+
+    sleep 2
+
+    if is_running; then
+        echo "ejahttp stop failed"
+    else
+        echo "ejahttp stop successfully"
+    fi
+}
+
+status()
+{
+    if is_running; then
+        yaws_status
+    else
+        echo "ejahttp is stopped"
+    fi
+}
+
+is_running()
+{
+    PID=`ps auxww |grep -w beam |grep "name $NODE" |awk '{print $2}'`
+        if [ -z "$PID" ]; then
+            return 1
+        else
+            return 0
+        fi
+}
+
+help()
+{
+    echo "Usage: $0 {start|restart|stop|status}"
+}
+
+case $1 in 
+    'start') 
+        start
+        ;;
+    'stop') 
+        stop
+        ;;
+    'restart')
+        stop && start
+        ;;
+    'debug')
+         debug
+         ;;
+    'status')
+         status
+         ;;
+    'help')
+         help
+         ;;
+    *)
+         help
+         exit 1
+esac

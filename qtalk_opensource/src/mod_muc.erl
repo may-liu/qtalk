@@ -1,4 +1,4 @@
-%%%----------------------------------------------------------------------
+%z%----------------------------------------------------------------------
 %%% File    : mod_muc.erl
 %%% Author  : Alexey Shchepin <alexey@process-one.net>
 %%% Purpose : MUC support (XEP-0045)
@@ -31,6 +31,8 @@
 
 -behaviour(gen_mod).
 
+
+
 %% API
 -export([start_link/2,
 	 start/2,
@@ -38,6 +40,7 @@
 	 route/3,
 	 room_destroyed/4,
 	 store_room/4,
+	 store_room/5,
 	 restore_room/3,
 	 forget_room/3,
 	 create_room/5,
@@ -48,7 +51,13 @@
          import/1,
          import/3,
 		 opts_to_binary/1,
-	 can_use_nick/4]).
+	get_pid_hash_num/1,
+	check_muc_live/2,
+	 can_use_nick/4,
+    check_muc_owner/3]).
+
+-export([recreate_muc_room/6,recreate_muc_room/7,load_permanent_rooms_affiliations/2,update_user_affiliation/4]).
+-export([handle_recreate_muc/7]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2,
@@ -84,6 +93,7 @@
          default_room_opts = [] :: list(),
          room_shaper = none :: shaper:shaper()}).
 
+-record(route, {domain, pid, local_hint}).
 
 -define(PROCNAME, ejabberd_mod_muc).
 
@@ -227,7 +237,8 @@ process_iq_disco_items(Host, From, To,
 		sub_el =
 		    [#xmlel{name = <<"query">>,
 			    attrs = [{<<"xmlns">>, ?NS_DISCO_ITEMS}],
-			    children = iq_disco_items(Host, From, Lang, Rsm)}]},
+		%%	    children = iq_disco_items(Host, From, Lang, Rsm)}]},
+			    children = []}]},
     ejabberd_router:route(To, From, jlib:iq_to_xml(Res)).
 
 can_use_nick(_ServerHost, _Host, _JID, <<"">>) -> false;
@@ -318,6 +329,7 @@ init([Host, Opts]) ->
     catch ets:new(muc_users,[set,named_table,public,{keypos,1},{write_concurrency, true}, {read_concurrency, true}]),
     catch ets:new(muc_subscribe_users,[set,named_table,public,{keypos,2},{write_concurrency, true}, {read_concurrency, true}]),
     catch ets:new(muc_opts,[set,named_table,public,{keypos,1},{write_concurrency, true}, {read_concurrency, true}]),
+    catch ets:new(muc_affiliation,[set,named_table,public,{keypos,1},{write_concurrency, true}, {read_concurrency, true}]),
     clean_table_from_bad_node(node(), MyHost),
     mnesia:subscribe(system),
     Access = gen_mod:get_opt(access, Opts, fun(A) -> A end, all),
@@ -331,17 +343,16 @@ init([Host, Opts]) ->
 			default_room_opts = DefRoomOpts,history_size = HistorySize,room_shaper = RoomShaper},
 	catch ets:insert(muc_opts, {muc_state,DefOpts}),
 
-%%  ejabberd_router:register_route(MyHost),
-
-	%%------------------------------------------------------
-	%% 将mod_muc的请求并入用户的c2s/wlan_c2s进程中
-	%%-----------------------------------------------------
+%%    ejabberd_router:register_route(MyHost),
     ejabberd_router:register_route(MyHost, {apply, ?MODULE, route}),
 		
-    load_permanent_rooms(MyHost, Host,
-			 {Access, AccessCreate, AccessAdmin, AccessPersistent},
-			 HistorySize,
-			 RoomShaper),
+%	timer:sleep(20*1000),
+ %  load_permanent_rooms(MyHost, Host,
+%			 {Access, AccessCreate, AccessAdmin, AccessPersistent},
+%			 HistorySize,
+%			 RoomShaper),
+   load_permanent_rooms_affiliations(Host,MyHost),
+
     {ok, #state{host = MyHost,
 		server_host = Host,
 		access = {Access, AccessCreate, AccessAdmin, AccessPersistent},
@@ -416,6 +427,9 @@ handle_info({room_destroyed, RoomHost, Pid}, State) ->
 handle_info({mnesia_system_event, {mnesia_down, Node}}, State) ->
     clean_table_from_bad_node(Node),
     {noreply, State};
+handle_info({update_user_affiliation,Method,Muc,Jid,Aff},State) ->
+	update_user_affiliation(Method,Muc,Jid,Aff),
+	{noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -601,6 +615,8 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 		  <<"message">> ->
 		      case xml:get_attr_s(<<"type">>, Attrs) of
 			<<"error">> -> ok;
+			<<"readmark">> ->
+				readmark:readmark_message(From,To,Packet);
 			_ ->
 			    case acl:match_rule(ServerHost, AccessAdmin, From)
 				of
@@ -620,7 +636,17 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 				  ejabberd_router:route(To, From, Err)
 			    end
 		      end;
-		  <<"presence">> -> ok
+		  <<"presence">> -> 
+		  case catch xml:get_tag_attr_s(<<"xmlns">>, xml:get_subtag(Packet, <<"x">>)) of 
+		  ?NS_PRESENCE_ALL ->
+	  	%	join_all_registered_room(From,To,false);
+				make_muc_cheat_presence(From,To);
+		  ?NS_PRESENCE_ALL_V2 ->
+		 % 	join_all_registered_room(From,To,true);
+				make_muc_cheat_presence(From,To);
+		  	_ ->
+		  		ok
+		  	end
 		end;
 	    _ ->
 		case xml:get_attr_s(<<"type">>, Attrs) of
@@ -642,14 +668,19 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 							    AccessCreate, From,
 							    Room) of
 				true ->
-				    {ok, Pid} = start_new_room(
+				    {ok, Pid, Room_Type} = start_new_room(
 						  Host, ServerHost, Access,
 						  Room, HistorySize,
 						  RoomShaper, From,
 						  Nick, DefRoomOpts),
 				    register_room(Host, Room, Pid),
-				    mod_muc_room:route(Pid, From, Nick, Packet),
-				    ok;
+%%				    mod_muc_room:route(Pid, From, Nick, Packet),
+					case Room_Type of
+					<<"new_room">> ->
+						invite_all_creator_to_muc(Pid,From,Nick,Packet,Host,Room);
+					_ ->
+					    mod_muc_room:route(Pid, From, Nick, Packet)
+					end;
 				false ->
 				    Lang = xml:get_attr_s(<<"xml:lang">>, Attrs),
 				    ErrText = <<"Room creation is denied by service policy">>,
@@ -657,6 +688,14 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 					    Packet, ?ERRT_FORBIDDEN(Lang, ErrText)),
 				    ejabberd_router:route(To, From, Err)
 			    end;
+			{<<"message">>,<<"groupchat">>} ->
+				recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet);
+			{<<"message">>,<<"chat">>} ->
+				recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet);
+			{<<"message">>,<<"normal">>} ->
+				recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet);
+			{<<"iq">>,_} ->
+				catch mod_dispose_muc_not_alive_iq:dispose_iq(ServerHost,Room,Host,Nick,From,To,Packet);
 			_ ->
 				Lang = xml:get_attr_s(<<"xml:lang">>, Attrs),
 				ErrText = <<"Conference room does not exist">>,
@@ -726,11 +765,14 @@ get_rooms(LServer, Host, odbc) ->
     end.
 
 load_permanent_rooms(Host, ServerHost, Access, HistorySize, RoomShaper) ->
+	{Hash_num,Max_length} = get_pid_hash_num(Host),
     lists:foreach(
       fun(R) ->
               {Room, Host} = R#muc_room.name_host,
               case mnesia:dirty_read(muc_online_room, {Room, Host}) of
                   [] ->
+				  		case catch erlang:hash(Room,Max_length) of
+						Hash_num ->
                     	  		{ok, Pid} = mod_muc_room:start(
                     	  		              Host,
                     	  		              ServerHost,
@@ -740,6 +782,9 @@ load_permanent_rooms(Host, ServerHost, Access, HistorySize, RoomShaper) ->
                     	 	 	              RoomShaper,
                    		  	 	              R#muc_room.opts),
                    		  		 register_room(Host, Room, Pid);
+						_ ->
+							ok
+						end;
                   _ ->
                       ok
               end
@@ -751,15 +796,18 @@ start_new_room(Host, ServerHost, Access, Room,
     case restore_room(ServerHost, Host, Room) of
         error ->
 	    ?DEBUG("MUC: open new room '~s'~n", [Room]),
-	    mod_muc_room:start(Host, ServerHost, Access,
+		{ok,Pid} = mod_muc_room:start(Host, ServerHost, Access,
 			       Room, HistorySize,
 			       RoomShaper, From,
-			       Nick, DefRoomOpts);
+			       Nick, DefRoomOpts),
+        
+		{ok,Pid,<<"new_room">>};
         Opts ->
 	    ?DEBUG("MUC: restore room '~s'~n", [Room]),
-	    mod_muc_room:start(Host, ServerHost, Access,
+		{ok,Pid} = mod_muc_room:start(Host, ServerHost, Access,
 			       Room, HistorySize,
-			       RoomShaper, Opts)
+			       RoomShaper, Opts),
+		{ok,Pid,<<"permanent">>}
     end.
 
 register_room(Host, Room, Pid) ->
@@ -987,21 +1035,24 @@ iq_get_register_info(ServerHost, Host, From, Lang) ->
 						    <<"Enter nickname you want to register">>)}]},
 		   ?XFIELD(<<"text-single">>, <<"Nickname">>, <<"nick">>,
 			   Nick)]}].
-
-%%------------------------------------------------------
-%% 获取用户的注册的群列表
-%%-----------------------------------------------------
 iq_get_user_mucs(ServerHost, Host, From, Lang) ->
-	Mucs = case catch odbc_queries:get_user_mucs(ServerHost,<<"muc_room_users">>,From#jid.user) of
-		{selected,[<<"muc_name">>], SRes}	when is_list(SRes) ->
-		 lists:flatmap(fun([N]) ->
-			[N] end,SRes);
-		_ ->
-			[]
-  		end,
-	lists:map(fun (Muc_Name) ->
+	Mucs = 
+		case catch ejabberd_odbc:sql_query(From#jid.lserver,
+				[<<"select muc_name,domain from user_register_mucs where username = '">>,
+                    From#jid.user,<<"' and registed_flag = 1;">>]) of 
+		{selected,[<<"muc_name">>,<<"domain">>], SRes} when is_list(SRes) ->
+%		case catch odbc_queries:get_user_mucs(From#jid.lserver,<<"muc_room_users">>,From#jid.user) of
+%		{selected,[<<"muc_name">>,<<"host">>], SRes} when is_list(SRes) ->
+		%	lists:flatmap(fun([N,H]) ->
+				%		[{N,str:concat(<<"conference.">>,H)}] end,SRes);
+		%				[{N,H}] end,SRes);
+					SRes;
+			_ ->
+				[]
+			end,
+	lists:map(fun ([Muc_Name,H]) ->
 		#xmlel{name = <<"muc_rooms">>,
-			attrs = [{<<"name">>,Muc_Name},{<<"host">>,Host}],
+			attrs = [{<<"name">>,Muc_Name},{<<"host">>,H}],
 			children = []} end,Mucs).
 
 set_nick(ServerHost, Host, From, Nick) ->
@@ -1362,4 +1413,357 @@ import(_LServer, riak,
 		      [{'2i', [{<<"nick_host">>, {Nick, Host}}]}]);
 import(_, _, _) ->
     pass.
+
+get_pid_hash_num(Server) ->
+	Muc_routes = mnesia:dirty_read(route,Server),
+	Length = length(Muc_routes),
+	Nums = 
+		lists:map(fun(Num) ->
+			Muc_route = lists:nth(Num,Muc_routes),
+			if node(Muc_route#route.pid) == node() ->
+				Num;
+			true ->
+				0
+			end end,lists:seq(1,Length)),
+	{lists:max(Nums),Length}.
+
+join_all_registered_room(From,To,Flag) ->
+	Attrs =
+		case Flag of 
+		true ->
+   			[{<<"priority">>,<<"5">>},{<<"version">>,<<"2">>}];
+		_ ->
+			[{<<"priority">>,<<"5">>}]
+		end,
+	Presence_packet = 
+		#xmlel{name = <<"presence">>,
+			attrs = Attrs,
+				children = [
+				#xmlel{name = <<"x">>,
+					 attrs =[{<<"xmlns">>,
+						?NS_MUC}],
+					 children = []}
+					]},
+    Nick =  ejabberd_public:get_user_nick(From#jid.user),
+	case catch ejabberd_odbc:sql_query(From#jid.lserver,
+					[<<"select muc_name,domain from user_register_mucs where username = '">>,From#jid.user,<<"' and 
+                            registed_flag = 1;">>]) of 
+	{selected,[<<"muc_name">>,<<"domain">>], SRes} when is_list(SRes) ->
+		 send_user_room_packet(From,To,SRes),
+		 lists:foreach(fun([N,D]) ->
+			 case jlib:make_jid(N,D,Nick) of 
+			error ->
+				ok;	
+			NewTo ->
+				  ejabberd_router:route(From,NewTo, Presence_packet)
+			end end,SRes);
+	_ ->
+		ok
+  	end.
+
+
+send_user_room_packet(From,To,Rooms) ->
+	NewRooms =
+		lists:foldl(fun([R,_H],Acc) ->
+			case Acc of
+			[] ->
+				[R];
+			_ ->
+				[R] ++ [<<",">>] ++ Acc
+			end end,[],Rooms),
+	NewRooms1 =
+		lists:foldl(fun([R,H],Acc) ->
+			case Acc of
+			[] ->
+				[str:concat(R,str:concat(<<"@">>,H))];
+			_ ->
+				[str:concat(R,str:concat(<<"@">>,H))] ++ [<<",">>] ++ Acc
+			end end,[],Rooms),
+	Packet = 
+         #xmlel{name = <<"presence">>,
+	             attrs = [{<<"xmlns">>,?NS_USER_MUCS},{<<"mucs">>,list_to_binary(NewRooms)},{<<"muc_domains">>,list_to_binary(NewRooms1)}],
+		 children = []},
+	case jlib:make_jid(<<"muc_admin">>,From#jid.lserver,<<"">>) of
+	error ->
+		ok;
+	NewTo ->
+		ejabberd_router:route(NewTo,From, Packet)
+	end.
+
+invite_all_creator_to_muc(Pid,From,Nick,Packet,ServerHost,Room) ->
+	case ejabberd_sm:get_user_present_resources_and_pid(From#jid.luser,From#jid.lserver) of
+	L when is_list(L) ->
+		case length(L) > 1 of 
+		false ->
+			mod_muc_room:route(Pid, From, Nick, Packet);
+		true ->
+			lists:foreach(fun({_,R,UPid}) ->
+				if R == From#jid.lresource  ->
+					 mod_muc_room:route(Pid, From, Nick, Packet);
+				true ->
+					mod_muc_room:route(Pid, jlib:jid_replace_resource(From,R), Nick, Packet),
+					UPid !  {update_presence_a,{Room,ServerHost,Nick}}
+				end end,L)
+		end;
+	_ ->
+		mod_muc_room:route(Pid, From, Nick, Packet)
+	end.
+	
+
+check_muc_live(Room,Host) ->
+	case catch mnesia:dirty_read(muc_online_room, {Room, Host})	of
+	[] ->
+		false;
+	_ ->
+		true
+	end.
+
+handle_recreate_muc(Server,Muc,Host,From,Nick,Packet,Flag) ->
+	case catch ets:lookup(muc_opts, muc_state) of
+	[{ _,#state{host = Host, server_host = ServerHost,
+   		access = Access, default_room_opts = DefRoomOpts,
+		history_size = HistorySize,
+		room_shaper = RoomShaper} = State}] ->
+		{ok, Pid, _} = 	start_new_room(Host, Server, Access, Muc, HistorySize,  RoomShaper, From,  Nick, DefRoomOpts),
+    	register_room(Host, Muc, Pid),
+%		invite_all_reg_user(Server,From,Muc,Host,Pid,Flag),
+		?INFO_MSG("Recreate Muc ~p ~n",[Muc]),
+		mod_muc_room:route(Pid, From, Nick, Packet);
+	_ ->
+	    case catch ejabberd_odbc:sql_query(Server,[<<"select opts from muc_room where name='">>,Muc, <<"' and host='">>, Host,<<"';">>]) of	
+		{selected, [<<"opts">>], [[Opts]]} ->
+			Bopts = mod_muc:opts_to_binary(ejabberd_odbc:decode_term(Opts)),
+			{ok, Pid} = mod_muc_room:start(Host,Server,{all,all,none,all},Muc,20,none,Bopts),
+			register_room(Host, Muc, Pid),
+			?INFO_MSG("Recreate Muc default ~p ~n",[Muc]),
+%			invite_all_reg_user(Server,From,Muc,Host,Pid,Flag),
+			mod_muc_room:route(Pid, From, Nick, Packet);
+		_ ->
+			ok
+		end
+	end.
+	
+	%%
+	%%<message to="muc@conference.domain" type="normal">
+	%%	<x xmlns="http://jabber.org/protocol/muc#user"><invite to="user@domain"/></x></message>
+	%%
+	
+invite_all_reg_user(Server,From_JID,Muc,Host,Muc_Pid,Flag) ->
+	Presence_packet = 
+		#xmlel{name = <<"presence">>,
+			attrs = [{<<"priority">>,<<"5">>},{<<"version">>,<<"2">>}],
+				children = [
+					#xmlel{name = <<"x">>,
+					 attrs =[{<<"xmlns">>,
+						?NS_MUC}],
+					 children = []}
+					]},
+	case catch odbc_queries:get_muc_users(Server,<<"muc_room_users">>,Muc) of
+	{selected,[<<"muc_name">>,<<"username">>,<<"host">>], SRes}     when is_list(SRes) ->
+		lists:foreach(fun([M,U,H]) ->
+			Packet = 
+				case  Flag andalso From_JID#jid.luser =:= U of
+				false ->
+					Presence_packet;
+				_ ->
+					#xmlel{name = <<"presence">>,
+						attrs = [{<<"priority">>,<<"5">>},{<<"version">>,<<"p2">>}],
+						children = [
+							#xmlel{name = <<"x">>,
+							 attrs =[{<<"xmlns">>,
+								?NS_MUC}],
+							 children = []}
+								]}
+				end,
+			Nick =  ejabberd_public:get_user_nick(U),
+			if H =:= Server ->
+					case catch ejabberd_sm:get_user_present_resources_and_pid(U,H) of
+					UPL when is_list(UPL) ->
+						lists:foreach(fun({_,R,Pid}) ->
+						case jlib:make_jid(U,H,R)  of
+						error ->
+							?INFO_MSG("Make jid error U ~p,H ~p ,R ~p ~n",[U,H,R]);
+						From ->
+        					mod_muc_room:route(Muc_Pid, From, Nick, Packet),
+					 		Pid ! {update_presence_a,{Muc,Host,Nick}}
+						end	end,  UPL);
+					Reason ->
+						?INFO_MSG("U ~p ,H ~p ,Reason ~p ~n",[U,H,Reason])
+					end;
+				true ->
+					?INFO_MSG("H ~p,Server ~p ,Muc ~p ,User ~p ~n",[H,Server,Muc,U]),
+					case jlib:make_jid(U,H,<<"">>)  of
+					error ->
+							?INFO_MSG("Make jid error U ~p,H ~p ,R null ~n",[U,H]),
+							ok;
+					OFrom ->
+						mod_muc_room:route(Muc_Pid, OFrom, Nick, Packet),
+						sned_update_presence_a(From_JID,OFrom,Muc,Host,Nick)
+					end
+			end
+		  end,SRes);
+	ERR ->
+		?INFO_MSG("Invite_all_reg_user error,Reason ~p ~n",[ERR])	
+	end.	
+	
+
+sned_update_presence_a(From,To,Muc,Domain,Nick) ->
+	Packet =  #xmlel{name = <<"presence">>,
+			 attrs = [{<<"type">>, <<"update_pres_a">>},{<<"xmlns">>, ?NS_UPDATE_PRES_A},
+			 		  {<<"muc_name">>,Muc},{<<"muc_domain">>,Domain},{<<"muc_nick">>,Nick}],
+			 	children =[]},
+	ejabberd_router:route(From,To,Packet).
+
+make_cheat_presence_packet(JID,User,Server,Muc) ->
+	Packet = 
+		#xmlel{name = <<"presence">>,
+			attrs = [{<<"priority">>,<<"5">>},{<<"version">>,<<"2">>}],
+				children = [
+				#xmlel{name = <<"x">>,
+					 attrs =[{<<"xmlns">>,
+						?NS_MUC_USER}],
+					 children = [
+							#xmlel{name = <<"item">>,attrs = [{<<"affiliation">>,get_user_muc_affiliation(JID,Muc)},
+									{<<"real_jid">>,User},
+									{<<"domain">>,Server},
+									{<<"role">>,<<"participant">>}],children =  []},
+							#xmlel{name = <<"status">>,attrs = [{<<"code">>, <<"110">>}],children = []}]}]}.
+
+make_muc_cheat_presence(From,To) ->
+    Nick =  ejabberd_public:get_user_nick(From#jid.user),
+	JID = jlib:jid_to_string(jlib:jid_remove_resource(From)),
+	case catch ejabberd_odbc:sql_query(From#jid.lserver,
+					[<<"select muc_name,domain from user_register_mucs where username = '">>,From#jid.user,
+                            <<"' and registed_flag = 1;">>]) of 
+	{selected,[<<"muc_name">>,<<"domain">>], SRes} when is_list(SRes) ->
+		 send_user_room_packet(From,To,SRes),
+		 lists:foreach(fun([N,D]) ->
+			 case jlib:make_jid(N,D,Nick) of 
+			error ->
+				ok;	
+			NewTo ->
+			      Packet = make_cheat_presence_packet(JID,From#jid.luser,From#jid.lserver,N),
+				  ejabberd_router:route(NewTo,From, Packet)
+			end end,SRes);
+	_ ->
+		ok
+  	end.
+
+get_user_muc_affiliation(User,Muc) ->
+	case catch ets:lookup(muc_affiliation,Muc) of
+	[{_,L}] when is_list(L) andalso L =/= [] ->
+		Aff = proplists:get_value(User,L,none),
+		if  Aff =:= admin ->
+			<<"admin">>;
+			Aff =:= owner ->
+			<<"owner">>;
+			true ->
+			<<"none">>
+		end;
+	_ ->
+		<<"none">>
+	end.
+
+recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet) ->
+	do_recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet,false).
+
+recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet,Flag) ->
+	do_recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet,Flag).
+
+do_recreate_muc_room(ServerHost,Host,Room,From,Nick,Packet,Flag) ->
+	if From#jid.lserver =:= ServerHost  ->
+		case catch ejabberd_odbc:sql_query(ServerHost,
+			[<<"select created_at from user_register_mucs where username = '">>,From#jid.luser,<<"' and muc_name = '">>,
+					Room,<<"' and domain = '">>,Host,<<"' and registed_flag = 1;">>]) of
+		{selected, _ , [[_T]]} -> 
+			handle_recreate_muc(ServerHost,Room,Host,From,Nick,Packet,Flag);
+		_ ->
+			ok
+		end;
+	true ->
+		case catch ejabberd_odbc:sql_query(ServerHost,
+			[<<"select subscribe_flag from muc_room_users where username = '">>,From#jid.luser,<<"' and muc_name = '">>,
+				Room,<<"' and host = '">>,From#jid.lserver,<<"';">>]) of
+		{selected, _ , [[_T]]} ->
+			handle_recreate_muc(ServerHost,Room,Host,From,Nick,Packet,Flag);
+		_ ->
+			ok
+		end
+	end.
+
+load_permanent_rooms_affiliations(LServer,Host) ->
+    SHost = ejabberd_odbc:escape(Host),
+    case catch ejabberd_odbc:sql_query(LServer,
+				       [<<"select name, opts from muc_room ">>,
+					<<"where host='">>, SHost, <<"';">>])
+	of
+      {selected, [<<"name">>, <<"opts">>], RoomOpts} ->
+	  lists:foreach(fun ([Room, Opts]) ->
+				      Affction = get_affction_opts(
+                                               ejabberd_odbc:decode_term(Opts)),
+					  catch ets:insert(muc_affiliation,{Room,Affction})
+		    end,
+		    RoomOpts);
+      Err -> ?ERROR_MSG("failed to get rooms: ~p", [Err]), []
+    end.
+
+check_muc_owner(LServer,Muc,User) ->
+    case catch ejabberd_odbc:sql_query(LServer,
+         [<<"select opts from muc_room ">>,<<"where name='">>, Muc, <<"';">>]) of
+     {selected, _ ,[[Opts]]} ->
+         Affction = get_affction_opts(ejabberd_odbc:decode_term(Opts)),
+         Aff = proplists:get_value(User,Affction,none),
+         case Aff  of
+         'admin' ->
+            true;
+         'owner' ->
+            true;
+         _ ->
+            false
+         end;
+    _ ->
+        false
+    end.
+         
+            
+
+
+get_affction_opts(Opts) ->
+    lists:flatmap(
+      fun({affiliations, Affs}) ->
+             lists:flatmap(
+				 fun({{U, S, _R}, {NewAff,<<"">>}}) ->
+                     [{jlib:jid_to_string({iolist_to_binary(U), iolist_to_binary(S),<<"">>}),
+                           NewAff}];
+					(_) ->
+				   		[]
+					end, Affs);
+         (_) ->
+              []
+      end, Opts).
+
+update_user_affiliation(<<"update">>,Muc,JID,Aff) ->
+	case catch ets:lookup(muc_affiliation,Muc) of
+	[{_,L}] when is_list(L) andalso L =/= [] ->
+		Aff1 = proplists:get_value(JID,L),
+		if Aff1 =:= Aff ->
+			ok;
+		true ->
+			L1 = lists:keydelete(JID,1,L),
+			L2 = lists:append([{JID,Aff}],L1),
+			catch ets:insert(muc_affiliation,{Muc,L2})
+		end;
+	_ ->
+		ok
+	end;
+update_user_affiliation(<<"delete">>,Muc,JID,Aff) ->
+	case catch ets:lookup(muc_affiliation,Muc) of
+	[{_,L}] when is_list(L) andalso L =/= [] ->
+		L1 = lists:keydelete(JID,1,L),
+		catch ets:insert(muc_affiliation,{Muc,L1});
+	_ ->
+		ok
+	end;
+update_user_affiliation(_,Muc,JID,Aff) ->
+	ok.
 

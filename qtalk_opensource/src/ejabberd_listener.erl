@@ -51,6 +51,8 @@ start_link() ->
 
 init(_) ->
     ets:new(listen_sockets, [named_table, public]),
+    Ret = ets:new(rsa_info, [set, named_table, public, {keypos, 1},{write_concurrency, true}, {read_concurrency, true}]),
+	?INFO_MSG("init rsa_info res ~p ~n",[Ret]),
     bind_tcp_ports(),
     {ok, {{one_for_one, 10, 1}, []}}.
 
@@ -366,6 +368,7 @@ start_listener2(Port, Module, Opts) ->
     %% It is only required to start the supervisor in some cases.
     %% But it doesn't hurt to attempt to start it for any listener.
     %% So, it's normal (and harmless) that in most cases this call returns: {error, {already_started, pid()}}
+	?DEBUG("Port ~p ,Moduel ~p ,Opts ~p ~n",[Port, Module, Opts]),
     maybe_start_sip(Module),
     start_module_sup(Port, Module),
     start_listener_sup(Port, Module, Opts).
@@ -379,7 +382,7 @@ start_module_sup(_Port, Module) ->
 	 infinity,
 	 supervisor,
 	 [ejabberd_tmp_sup]},
-    supervisor:start_child(ejabberd_sup, ChildSpec1).
+	supervisor:start_child(ejabberd_sup, ChildSpec1).
 
 start_listener_sup(Port, Module, Opts) ->
     ChildSpec = {Port,
@@ -669,3 +672,5 @@ prepare_mod(sip) ->
     esip_socket;
 prepare_mod(Mod) when is_atom(Mod) ->
     Mod.
+
+

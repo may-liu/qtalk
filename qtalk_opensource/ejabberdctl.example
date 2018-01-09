@@ -11,7 +11,7 @@ ERLANG_NODE=ejabberd@localhost
 
 # define default environment variables
 SCRIPT_DIR=`cd ${0%/*} && pwd`
-ERL=/home/q/erlang.16B03/bin/erl
+ERL=/home/q/erlang17.5/bin/erl
 INSTALLUSER=
 
 # Compatibility in ZSH
@@ -55,7 +55,7 @@ done
 
 # Define ejabberd variable if they have not been defined from the command line
 if [ "$ETC_DIR" = "" ] ; then
-    ETC_DIR=/home/q/ejabberd14.07/etc/ejabberd
+    ETC_DIR=/home/q/ejabberd.14.07.1/etc/ejabberd
 fi
 if [ "$EJABBERDCTL_CONFIG_PATH" = "" ] ; then
     EJABBERDCTL_CONFIG_PATH=$ETC_DIR/ejabberdctl.cfg
@@ -67,13 +67,13 @@ if [ "$EJABBERD_CONFIG_PATH" = "" ] ; then
     EJABBERD_CONFIG_PATH=$ETC_DIR/ejabberd.yml
 fi
 if [ "$LOGS_DIR" = "" ] ; then
-    LOGS_DIR=/home/q/ejabberd14.07/var/log/ejabberd
+    LOGS_DIR=/home/q/ejabberd.14.07.1/var/log/ejabberd
 fi
 if [ "$SPOOL_DIR" = "" ] ; then
-    SPOOL_DIR=/home/q/ejabberd14.07/var/lib/ejabberd
+    SPOOL_DIR=/home/q/ejabberd.14.07.1/var/lib/ejabberd
 fi
 if [ "$EJABBERD_DOC_PATH" = "" ] ; then
-    EJABBERD_DOC_PATH=/home/q/ejabberd14.07/share/doc/ejabberd
+    EJABBERD_DOC_PATH=/home/q/ejabberd.14.07.1/share/doc/ejabberd
 fi
 if [ "$ERLANG_NODE_ARG" != "" ] ; then
     ERLANG_NODE=$ERLANG_NODE_ARG
@@ -81,7 +81,7 @@ if [ "$ERLANG_NODE_ARG" != "" ] ; then
 fi
 if [ "{{release}}" != "true" ] ; then
     if [ "$EJABBERDDIR" = "" ] ; then
-        EJABBERDDIR=/home/q/ejabberd14.07/lib/ejabberd
+        EJABBERDDIR=/home/q/ejabberd.14.07.1/lib/ejabberd
     fi
     if [ "$EJABBERD_EBIN_PATH" = "" ] ; then
         EJABBERD_EBIN_PATH=$EJABBERDDIR/ebin
@@ -281,7 +281,7 @@ ctl()
     # using flock if available. Expects a linux-style
     # flock that can lock a file descriptor.
     MAXCONNID=100
-    CONNLOCKDIR=/home/q/ejabberd14.07/var/lock/ejabberdctl
+    CONNLOCKDIR=/home/q/ejabberd.14.07.1/var/lock/ejabberdctl
     FLOCK='/usr/bin/flock'
     if [ ! -x "$FLOCK" ] || [ ! -d "$CONNLOCKDIR" ] ; then
         JOT='/usr/bin/jot'

@@ -1,8 +1,3 @@
-
-%%==================================================
-%%http请求模块
-%%==================================================
-
 -module(mod_http_client).
 
 -behaviour(gen_mod).
@@ -16,12 +11,11 @@
 -export([start_link/2,init/1]).
 -export([add_pid/2, remove_pid/2,get_pids/1, get_random_pid/1]).
 
--define(DEFAULT_POOL_SIZE, 50).
+-define(DEFAULT_POOL_SIZE, 65).
 
 start(Host, Opts)->
-	catch ets:new(http_client_pid, [named_table, bag, public]),
-    Proc = get_proc_name(Host),
-    ChildSpec =  {Proc,{?MODULE, start_link,[Host,Opts]}, permanent, infinity,supervisor,[Proc]},
+	ets:new(http_client_pid, [named_table, bag, public]),
+    ChildSpec =  {?MODULE,{?MODULE, start_link,[Host,Opts]}, permanent, infinity,supervisor,[?MODULE]},
     {ok, _Pid} = supervisor:start_child(ejabberd_sup, ChildSpec).
 
 start_link(Host,Opts) ->
@@ -70,14 +64,14 @@ add_pid(Host,Pid) ->
 remove_pid(Host,Pid) ->
     ets:delete_object(http_client_pid,{Host,Pid}).
 
+stop_child() ->
+    lists:foreach(fun({_,Pid}) ->
+        gen_server:cast(Pid, stop) end,ets:tab2list(http_client_pid)).
 
 stop(Host) ->
-	catch ets:delete(http_client_pid),
-    Proc = get_proc_name(Host),
-    supervisor:terminate_child(ejabberd_sup, Proc),
-    supervisor:delete_child(ejabberd_sup, Proc),
-    ok.
+    supervisor:terminate_child(ejabberd_sup, ?MODULE),
+    supervisor:delete_child(ejabberd_sup, ?MODULE),
+    stop_child(),
+	catch ets:delete(http_client_pid).
 
-get_proc_name(Host) ->
-    gen_mod:get_module_proc(Host, ?PROCNAME).
 

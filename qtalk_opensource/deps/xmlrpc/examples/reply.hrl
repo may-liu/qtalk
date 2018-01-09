@@ -1,2 +1,0 @@
-
--record(reply, {tag, val}).

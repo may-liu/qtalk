@@ -1,7 +1,3 @@
-%%=========================================================
-%%http
-%%=========================================================
-
 -module(http_utils).
 
 -include("ejabberd.hrl").
@@ -14,9 +10,10 @@
          gen_result/3,
          gen_result/4,
 		 verify_user_key/2,
-		 verify_user_key/1,
-		 to_integer/1,
-		 to_integer/2
+		 do_verify_user_key/3,
+		 to_integer/2,
+		 to_binary/2,
+		 to_integer/1
         ]).
 
 %%--------------------------------------------------------------------
@@ -40,6 +37,7 @@ check_ip(Req) ->
                                             end),
     {Headers, _} = cowboy_req:headers(Req),
     IP = proplists:get_value(<<"x-real-ip">>, Headers),
+    ?DEBUG("the x-real-ip is ~p~n", [IP]),
     check_ip(IP, LimitedIPs).
 
 check_ip(_IP, undefined) ->
@@ -50,6 +48,10 @@ check_ip(undefined, _) ->
     false;
 check_ip(IP, LimitedIPs) ->
     lists:member(IP, LimitedIPs).
+
+check_authorization(From,Req) ->
+	{Headers, _} = cowboy_req:headers(Req),
+	IP = proplists:get_value(<<"x-real-ip">>, Headers).
 
 gen_result(Ret, Code, Msg) ->
     list_to_binary(rfc4627:encode({obj, [{"ret", Ret}, {"errcode", Code}, {"errmsg", Msg}]})).
@@ -70,7 +72,7 @@ check_version(Req) ->
 do_check_version(undefined,_Ver) ->
 	false;
 do_check_version(<<"qim_windows">>,Ver) ->
-	case Ver >= 10120930 of
+	case Ver >= 10120960 of
 	true ->
 		true;
 	_ ->
@@ -91,45 +93,29 @@ do_check_version(<<"mac">>,Ver) ->
 		false
 	end;
 do_check_version(_,_Ver) ->
-   false.
+        false.
 
 		
-to_integer(V) ->
-	to_integer(V,1).
-
-to_integer(V,Default) when is_binary(V) ->
-    try
-        binary_to_integer(V)
-    catch _:_ ->
-        Default
-    end;
-to_integer(V,Default)  when is_list(V) ->
-    try
-        list_to_integer(V)
-    catch _:_ ->
-	    Default
-	end;
-to_integer(V,_Default) when is_integer(V) ->
+to_integer(V) when is_binary(V) ->
+	binary_to_integer(V);
+to_integer(V)  when is_list(V) ->
+	list_to_integer(V);
+to_integer(V) when is_integer(V) ->
     V;
-to_integer(_,Default) ->
-    Default.
-
-verify_user_key(Req) ->
-    Servers = ejabberd_config:get_myhosts(),
-    Server = lists:nth(1,Servers),
-	verify_user_key(Server,Req).
+to_integer(V) ->
+	1.
 
 verify_user_key(Server,Req) ->
 	{User,_} = cowboy_req:qs_val(<<"u">>, Req),
 	{Key,_} = cowboy_req:qs_val(<<"k">>, Req),
 	do_verify_user_key(Server,User,Key).
 
-do_verify_user_key(_Server,undefined,_) ->
+do_verify_user_key(Server,undefined,_) ->
 	false;
-do_verify_user_key(_Server,_,undefined) ->
+do_verify_user_key(Server,_,undefined) ->
 	false;
 do_verify_user_key(Server,User,Key) when is_binary(User),is_binary(Key)->
-	case catch redis_link:hash_get(Server,2,binary_to_list(User),binary_to_list(Key)) of
+	case catch redis_link:hash_get(Server,2,User,Key) of
 	{ok,undefined} ->
 		false;
 	{ok,_ } ->
@@ -137,6 +123,39 @@ do_verify_user_key(Server,User,Key) when is_binary(User),is_binary(Key)->
 	_ ->
 		false
 	end;
-do_verify_user_key(_,_,_) ->
+do_verify_user_key(Server,User,Key) ->
 	false.
 		
+to_integer(V,Default) when is_binary(V) ->
+	try 
+		binary_to_integer(V)
+	catch _:_ ->
+		Default
+	end;	
+to_integer(V,Default)  when is_list(V) ->
+    try 
+		list_to_integer(V)
+	catch _:_ ->
+	    Default
+	end;
+to_integer(V,_Default) when is_integer(V) ->
+    V;
+to_integer(_,Default) ->
+	Default.
+
+to_binary(V,Default) when is_integer(V) ->
+	try 
+		integer_to_binary(V)
+	catch _:_ ->
+		Default
+	end;	
+to_binary(V,Default)  when is_list(V) ->
+    try 
+		list_to_binary(V)
+	catch _:_ ->
+	    Default
+	end;
+to_binary(V,_Default) when is_binary(V) ->
+    V;
+to_binary(_,Default) ->
+	Default.

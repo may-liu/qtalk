@@ -54,6 +54,7 @@
          c2s_pid :: pid(),
 	 max_stanza_size = infinity :: non_neg_integer() | infinity,
          xml_stream_state :: xml_stream:xml_stream_state(),
+		 server,
          timeout = infinity:: timeout()}).
 
 -define(HIBERNATE_TIMEOUT, 90000).
@@ -141,7 +142,7 @@ init([Socket, SockMod, Shaper, MaxStanzaSize]) ->
 		_ -> infinity
 	      end,
     {ok,
-     #state{socket = Socket, sock_mod = SockMod,
+     #state{socket = Socket, sock_mod = SockMod,server = lists:nth(1, ejabberd_config:get_myhosts()),
 	    shaper_state = ShaperState,
 	    max_stanza_size = MaxStanzaSize, timeout = Timeout}}.
 
@@ -234,9 +235,11 @@ handle_cast(_Msg, State) ->
 %% Description: Handling all non call/cast messages
 %%--------------------------------------------------------------------
 handle_info({Tag, _TCPSocket, Data},
-	    #state{socket = Socket, sock_mod = SockMod} = State)
+	    #state{socket = Socket, sock_mod = SockMod,server = Server} = State)
     when (Tag == tcp) or (Tag == ssl) or
 	   (Tag == ejabberd_xml) ->
+	catch mod_monitor:monitor_count(Server,<<"recv_all_size">>,byte_size(Data)),
+	catch mod_monitor:monitor_count(Server,<<"recv_xml_size">>,1),
     case SockMod of
       p1_tls ->
 	  	case p1_tls:recv_data(Socket, Data) of
@@ -247,8 +250,10 @@ handle_info({Tag, _TCPSocket, Data},
 	  	  {error, _Reason} -> {stop, normal, State}
 	  	end;
       ezlib ->
+	  	catch mod_monitor:monitor_count(Server,<<"recv_zip_size">>,byte_size(Data)),
 	  	case ezlib:recv_data(Socket, Data) of
 	  	  {ok, ZlibData} ->
+		  		catch mod_monitor:monitor_count(Server,<<"recv_unzip_size">>,byte_size(ZlibData)),
 	  	  {noreply, process_data(ZlibData, State),
 	  	   ?HIBERNATE_TIMEOUT};
 	  	  {error, _Reason} -> {stop, normal, State}
@@ -256,14 +261,17 @@ handle_info({Tag, _TCPSocket, Data},
       _ ->
 		{noreply, process_data(Data, State), ?HIBERNATE_TIMEOUT}
     end;
-handle_info({Tag, _TCPSocket}, State)
+handle_info({Tag, TCPSocket}, State)
     when (Tag == tcp_closed) or (Tag == ssl_closed) ->
+		?INFO_MSG("Scoket ~p ,Reason ~p ~n",[Tag,TCPSocket]),
     {stop, normal, State};
-handle_info({Tag, _TCPSocket, Reason}, State)
+handle_info({Tag, TCPSocket, Reason}, State)
     when (Tag == tcp_error) or (Tag == ssl_error) ->
     case Reason of
       timeout -> {noreply, State, ?HIBERNATE_TIMEOUT};
-      _ -> {stop, normal, State}
+      _ -> 
+		?INFO_MSG("Scoket ~p ,Reason ~p ~n",[Tag,TCPSocket]),
+		{stop, normal, State}
     end;
 handle_info({timeout, _Ref, activate}, State) ->
     activate_socket(State),
@@ -332,6 +340,7 @@ process_data([Element | Els],
 	 element(1, Element) == xmlstreamend ->
     if C2SPid == undefined -> State;
        true ->
+        ?DEBUG("~p ~n",[Element]),
 	   catch gen_fsm:send_event(C2SPid,
 				    element_wrapper(Element)),
 	   process_data(Els, State)
@@ -341,8 +350,8 @@ process_data(Data,
 	     #state{xml_stream_state = XMLStreamState,
 		    shaper_state = ShaperState, c2s_pid = C2SPid} =
 		 State) ->
-    %%?DEBUG("[Recv XML on stream] ~s", [(Data)]),
-    ?INFO_MSG("[Recv XML on stream] ~s", [(Data)]),
+    ?DEBUG("[Recv XML on stream] ~s ~n", [(Data)]),
+   %% ?INFO_MSG("[Recv XML on stream] ~s", [(Data)]),
     XMLStreamState1 = xml_stream:parse(XMLStreamState, Data),
     {NewShaperState, Pause} = shaper:update(ShaperState, byte_size(Data)),
     if

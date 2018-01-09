@@ -64,12 +64,18 @@
 	 insert_chat_msg/9,
 	 record_show/4,
 	 get_user_away_rescources/2,
+	 get_user_session/2,
+	 judge_away_flag/2,
+	 add_datetime_to_packet/3,
+	 add_msectime_to_packet/4,
 	 timestamp_to_xml/1
 	]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2,
 	 handle_info/2, terminate/2, code_change/3]).
+
+-export([get_user_present_resources_and_pid/2]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -90,6 +96,9 @@
 
 %% default value for the maximum number of user connections
 -define(MAX_USER_SESSIONS, infinity).
+-define(DIRECTION, <<"recv">>).
+-define(CN, <<"qchat">>).
+-define(USRTYPE, <<"common">>).
 
 %%====================================================================
 %% API
@@ -134,6 +143,7 @@ open_session(SID, User, Server, Resource, Priority, Info) ->
 -spec open_session(sid(), binary(), binary(), binary(), info()) -> ok.
 
 open_session(SID, User, Server, Resource, Info) ->
+	
     open_session(SID, User, Server, Resource, undefined, Info).
 
 -spec close_session(sid(), binary(), binary(), binary()) -> ok.
@@ -151,7 +161,7 @@ close_session(SID, User, Server, Resource) ->
     mnesia:sync_dirty(F),
     JID = jlib:make_jid(User, Server, Resource),
 	
-	catch mod_monitor:count_user_login_out(Server,User,0),
+%%	catch mod_monitor:count_user_login_out(Server,User,0),
 %	case catch redis_link:hash_get(Server,1,binary_to_list(User),binary_to_list(Resource)) of 
 %	{ok,undefined} ->
 %		ok;
@@ -211,6 +221,27 @@ get_user_present_resources(LUser, LServer) ->
 	      is_integer(S#session.priority)]
     end.
 
+get_user_present_resources_and_pid(LUser, LServer) ->
+    US = {LUser, LServer},
+    case catch mnesia:dirty_index_read(session, US,
+				       #session.us)
+	of
+      {'EXIT', _Reason} -> [];
+      Ss ->
+	  [{S#session.priority, element(3, S#session.usr),element(2, S#session.sid)}
+	   || S <- clean_session_list(Ss),
+	      is_integer(S#session.priority)]
+    end.
+
+get_user_session(LUser, LServer) ->
+    US = {LUser, LServer},
+    case catch mnesia:dirty_index_read(session, US,
+				       #session.us)
+	of
+      {'EXIT', _Reason} -> [];
+      Ss ->
+	  [S  || S <- clean_session_list(Ss), is_integer(S#session.priority)]
+    end.
 -spec get_user_ip(binary(), binary(), binary()) -> ip().
 
 get_user_ip(User, Server, Resource) ->
@@ -533,9 +564,9 @@ do_route(From, To, {broadcast, _} = Packet) ->
             end
     end;
 do_route(From, To, #xmlel{} = Packet) ->
-   ?DEBUG("session manager~n\tfrom ~p~n\tto ~p~n\tpacket "
-	   "~P~n",
-	   [From, To, Packet, 8]),
+%   ?DEBUG("session manager~n\tfrom ~p~n\tto ~p~n\tpacket "
+%	   "~P~n",
+%	   [From, To, Packet, 8]),
     #jid{user = User, server = Server,
 	 luser = LUser, lserver = LServer, lresource = LResource} = To,
 	#xmlel{name = Name, attrs = Attrs, children = Els} = Packet,
@@ -596,10 +627,7 @@ do_route(From, To, #xmlel{} = Packet) ->
 				   _ -> {true, false}
 				 end,
 		if Pass ->
-			PResources = get_user_present_resources(LUser, LServer),
-   		    lists:foreach(fun ({_, R}) ->
-				do_route(From,jlib:jid_replace_resource(To,R), Packet) 
-				end,PResources);
+			handle_presence(LServer,From,To,Packet,Attrs);
 		   true -> ok
 		end;
 	    <<"message">> -> 
@@ -609,7 +637,6 @@ do_route(From, To, #xmlel{} = Packet) ->
 	  end;
       _ ->
 	  USR = {LUser, LServer, LResource},
-	  ?DEBUG("User LResource ~p ~n",[LResource]),
 	  case mnesia:dirty_index_read(session, USR, #session.usr)
 	      of
 	    [] ->
@@ -632,11 +659,13 @@ do_route(From, To, #xmlel{} = Packet) ->
 		NewPacket  =
 			case Name of
 		   	<<"message">> ->
-				make_new_packet(From,To,Packet,Name,Attrs,Els,Session,LServer,LResource,true);	
+				make_new_packet(From,To,Packet,Name,Attrs,Els);	
+			<<"iq">> ->
+				insert_user_mucs(From,To,Packet),
+				Packet;
 	    	_ ->
 				Packet
 	  	  end,
-		  ?DEBUG("Send Pid ~p ~n",[Pid]),
 		Pid ! {route, From, To, NewPacket}
 		end
    	 end.
@@ -670,10 +699,12 @@ route_message(From, To, Packet) ->
 	case xml:get_tag_attr_s(<<"type">>, Packet) of
 	<<"readmark">> -> 
 		readmark:readmark_message(From,To,Packet);
+	<<"revoke">> ->
+		revoke:revoke_message(From,To,Packet);
 	_ ->
     	PrioRes = get_user_present_resources(LUser, LServer),
 		#xmlel{name = Name, attrs = Attrs, children = Els} = Packet,
-		NewPacket = make_new_packet(From,To,Packet,Name,Attrs,Els,<<"">>,LServer,<<"">>,false), 
+		NewPacket = make_new_packet(From,To,Packet,Name,Attrs,Els),
     	case catch lists:max(PrioRes) of
     	  {Priority, _R}
 		  when is_integer(Priority), Priority >= 0 ->
@@ -681,23 +712,28 @@ route_message(From, To, Packet) ->
    	   _ ->
 		  case xml:get_tag_attr_s(<<"type">>, Packet) of
 		    <<"error">> -> ok;
-		    <<"groupchat">> ->
-			bounce_offline_message(From, To, Packet);
-		  % <<"headline">> ->
-	%		bounce_offline_message(From, To, Packet);
+		    <<"groupchat">> -> 	ok;
 			<<"subscription">>->
 				subscription:subscription_message(From,To,Packet);
 			<<"readmark">> ->
 				readmark:readmark_message(From,To,Packet);	
+            <<"consult">> ->
+                consult_message(From,To,Packet);
 		    _ ->
 				case ejabberd_auth:is_user_exists(LUser, LServer) of
 				true ->
-			      case is_privacy_allow(From, To, Packet) of
+					case is_privacy_allow(From, To, Packet) of
 					true ->
-				    ejabberd_hooks:run(offline_message_hook, LServer,
-					       [From, To, Packet]);
-					false -> ok
-		    	  end;
+							case catch  check_carbon_msg(Packet) of
+							true ->
+								ok;
+							_ ->
+				    			ejabberd_hooks:run(offline_message_hook, LServer,
+					    	   	[From, To, Packet])
+							end;
+                    _ ->
+                            ok
+                    end;
 			  _ ->
 			      Err = jlib:make_error_reply(Packet,
 							  ?ERR_SERVICE_UNAVAILABLE),
@@ -802,7 +838,7 @@ process_iq(From, To, Packet) ->
 					    ?ERR_SERVICE_UNAVAILABLE),
 		ejabberd_router:route(To, From, Err)
 	  end;
-      reply -> ok;
+      reply -> insert_user_mucs(From,To,Packet), ok;
       _ ->
 	  Err = jlib:make_error_reply(Packet, ?ERR_BAD_REQUEST),
 	  ejabberd_router:route(To, From, Err),
@@ -904,10 +940,8 @@ update_tables() ->
 	    ok
     end.
 
-%%--------------------------------------------------------
-%%单点消息入库，Body等字段留用，用于后续elasticsearch开发
-%%--------------------------------------------------------
-insert_chat_msg(Server,From, To,_From_host,_To_host, Msg,_Body,ID,InsertTime) ->
+
+insert_chat_msg(Server,From, To,From_host,To_host, Msg,_Body,ID,InsertTime) ->
     case jlib:nodeprep(From) of
     error -> {error, invalid_jid};
     LUser ->
@@ -915,12 +949,33 @@ insert_chat_msg(Server,From, To,_From_host,_To_host, Msg,_Body,ID,InsertTime) ->
 	         LTo = ejabberd_odbc:escape(To),
 	         LBody = ejabberd_odbc:escape(Msg),
 	         LID = ejabberd_odbc:escape(ID),
-	         LServer = jlib:nameprep(Server),
-			case catch odbc_queries:insert_msg(LServer, LFrom,LTo,LBody,LID,InsertTime) of
-	        {updated, 1} -> {atomic, ok};
-            _ ->
-				?INFO_MSG("Insert Msg error Body: ~p ~n",[LBody]),
-				{atomic, exists}
+	         LServer = get_server(From_host,To_host),
+			 Time = ejabberd_public:pg2timestamp(InsertTime),
+			 case str:str(LID,<<"http">>)  of 
+			 0 ->
+			 	case catch odbc_queries:insert_msg6(LServer, LFrom,LTo,From_host,To_host,LBody,LID,Time) of
+	         	{updated, 1} -> {atomic, ok};
+             	A ->
+					?INFO_MSG("Insert Msg error Body: ~p ,~p ~n",[A,LBody]),
+					{atomic, exists}
+	        	 end;
+			_ ->
+			 	case ejabberd_public:judge_spec_jid(LFrom,LTo) of
+				true ->
+					case catch odbc_queries:insert_msg4(LServer, LFrom,LTo,From_host,To_host,LBody,LID,Time) of
+					{updated, 1} -> {atomic, ok};
+					_ ->
+						?INFO_MSG("Insert Msg error Body: ~p ~n",[LBody]),
+						{atomic, exists}
+					end;
+				_ ->
+					case catch odbc_queries:insert_msg5(LServer, LFrom,LTo,From_host,To_host,LBody,LID,Time) of
+					 {updated, 1} -> {atomic, ok};
+					_ ->
+						?INFO_MSG("Insert Msg error Body: ~p ~n",[LBody]),
+						{atomic, exists}
+					end
+				end
 			end
 	 end.
 
@@ -932,9 +987,6 @@ timestamp_to_xml({{Year, Month, Day},
 	           {<<"stamp">>,iolist_to_binary(
 					io_lib:format("~4..0w~2..0w~2..0wT~2..0w:~2..0w:~2..0w",[Year, Month, Day, Hour, Minute,Second]))}],children = []}.
 
-%%-----------------------------------------------------
-%%记录用户状态(away,normal)
-%%-----------------------------------------------------
 record_show(User,Server,Resource,Show) ->
 	LUser = jlib:nodeprep(User),
 	LServer = jlib:nameprep(Server),
@@ -950,10 +1002,9 @@ record_show(User,Server,Resource,Show) ->
 			mnesia:write(Session#session{usr = USR,us = US, show = Show}) end,
 		mnesia:sync_dirty(F)
 	end.
-%%------------------------------------------------------------------------
+
 %%判读特殊情况，聊天室用户非正常退出，导致存在于聊天室中的#state.users表中，
 %%多域情况下给to用户会重复发送消息
-%%------------------------------------------------------------------------
 judge_to_user_available(_FServer,<<"">>,_R)->
 	true;
 judge_to_user_available(FServer,Rescource,R) ->
@@ -977,9 +1028,6 @@ send_muc_room_remove_unavailable_user(From,To) ->
 		Muc_Pid ! {delete_unavailable_user,To}
 	end.
 
-%%-----------------------------------------------------
-%%获取处于离开状态的用户rescources
-%%-----------------------------------------------------
 get_user_away_rescources(User, Server) ->
     LUser = jlib:nodeprep(User),
     LServer = jlib:nameprep(Server),
@@ -1000,85 +1048,82 @@ get_user_away_rescources(User, Server) ->
 		end,clean_session_list(Ss))
     end.
 
-%%-----------------------------------------------------
-%%插入离开状态消息表，用于消息push
-%%-----------------------------------------------------
-insert_away_spool(From,To,LServer,NewPacket) ->
-	From_User_name = ejabberd_odbc:escape(From#jid.luser),
+insert_away_spool(From,To,LServer,Packet) ->
+	FromUsername = ejabberd_odbc:escape(From#jid.luser),
 	Username = ejabberd_odbc:escape(To#jid.luser),
-	case catch ets:lookup(mac_push_notice,{Username,From_User_name}) of
+	#xmlel{name = Name,attrs = Attrs, children = Els} = Packet,	
+	TimeStamp = os:timestamp(),
+	NewPacket = #xmlel{name = Name,attrs = Attrs,
+						children = 
+						   	Els ++ [jlib:timestamp_to_xml(calendar:now_to_universal_time(TimeStamp),
+									utc, jlib:make_jid(<<"">>,From#jid.lserver ,<<"">>),
+									<<"Offline Storage">>),
+						jlib:timestamp_to_xml(calendar:now_to_universal_time(TimeStamp))]},
+	case catch ets:lookup(mac_push_notice,{Username,FromUsername}) of
 	[] ->
-			catch odbc_queries:add_spool_away(LServer,From_User_name,Username,
+			catch odbc_queries:add_spool_away(LServer,FromUsername,Username,
 					ejabberd_odbc:escape(xml:element_to_binary(NewPacket)),<<"0">>);
 	_ ->
-			catch odbc_queries:add_spool_away(LServer,From_User_name,Username,
+			catch odbc_queries:add_spool_away(LServer,FromUsername,Username,
 					ejabberd_odbc:escape(xml:element_to_binary(NewPacket)),<<"1">>)
 	end.
 
-%%-----------------------------------------------------
-%%插入普通单点消息
-%%-----------------------------------------------------
-insert_user_chat_msg(From,To,Packet,Name,Attrs,Els,Session,Mbody,LServer,LResource,Flag) ->
-		catch mod_monitor:monitor_count(LServer,<<"chat_message">>,1),
-		Now = mod_time:deal_timestamp(os:timestamp()),
-	    Carbon = xml:get_attr_s(<<"carbon_message">>, Attrs),
-		NewPacket = add_datetime_to_packet(Name,Attrs,Els,timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(Now))),
-		case Carbon =/= <<"true">> andalso (not mod_muc_room:is_invitation(Els)) of
-		true  ->
-			case Flag of
-			true ->
-				catch case Session#session.show == <<"away">> 
-					andalso (str:str(LResource,<<"PC_Client">>) =/= 0 orelse str:str(LResource,<<"mac">>) =/= 0) andalso 
-					xml:get_tag_attr_s(<<"msgType">>,xml:get_subtag(Packet,<<"body">>)) /= <<"1024">> of 
-				true ->
-					catch insert_away_spool(From,To,LServer,Packet);
-				_ ->
-					ok
-				end;
-			false ->
-				ok
-			end,
-			Msg_id = xml:get_tag_attr_s(<<"id">>,xml:get_subtag(Packet,<<"body">>)),
-			insert_chat_msg(LServer,From#jid.user,To#jid.user,From#jid.lserver,To#jid.lserver, xml:element_to_binary(
-						NewPacket),Mbody,Msg_id,Now),
-			NewPacket;
-		_ ->
-			NewPacket
-		end.
+try_insert_msg(From,To,Packet,Mbody) ->
+    #xmlel{name = Name, attrs = Attrs, children = Els} = Packet,
+    LServer = To#jid.lserver,
+    case  ejabberd_public:is_conference_server(From#jid.lserver) of
+    false ->
+        insert_user_chat_msg(From,To,Packet,Attrs,Els,Mbody,LServer);
+    _ ->
+        insert_muc_chat_msg(From,To,Packet,Name,Attrs,Els,Mbody,LServer)
+    end.
 
-%%-----------------------------------------------------
-%%插入通过群id发送的单点消息
-%%-----------------------------------------------------
-insert_muc_chat_msg(From,To,Packet,Name,Attrs,Els,Mbody,LServer)->
-	case mnesia:dirty_read(muc_online_room, {From#jid.user, From#jid.server}) of
-	[] ->
-			add_datetime_to_packet(Name,Attrs,Els);
-	[Muc] ->
-	        Now = mod_time:deal_timestamp(os:timestamp()),
-			Muc_Pid = Muc#muc_online_room.pid,
-			NewPacket = add_datetime_to_packet(Name,Attrs,Els,timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(Now))),
-			Muc_Pid ! {insert_chat_msg,LServer,From,To,From#jid.lserver,To#jid.lserver,Packet,Mbody,Now},
-			NewPacket
+insert_user_chat_msg(From,To,Packet,Attrs,Els,Mbody,LServer) ->
+	catch mod_monitor:monitor_count(LServer,<<"chat_message">>,1),
+	Carbon = xml:get_attr_s(<<"carbon_message">>, Attrs),
+    	Now = mod_time:get_exact_timestamp(),
+	
+    case Carbon =/= <<"true">> andalso (not mod_muc_room:is_invitation(Els)) of
+	true  ->
+		Msg_id = xml:get_tag_attr_s(<<"id">>,xml:get_subtag(Packet,<<"body">>)),
+		insert_chat_msg(LServer,From#jid.user,To#jid.user,From#jid.lserver,To#jid.lserver, xml:element_to_binary(
+					Packet),Mbody,Msg_id,Now);
+	_ ->
+		ok
 	end.
 
-%%-----------------------------------------------------
-%%发送消息
-%%-----------------------------------------------------
+insert_muc_chat_msg(From,To,_Packet,Name,Attrs,Els,Mbody,LServer)->
+	case mnesia:dirty_read(muc_online_room, {From#jid.user, From#jid.server}) of
+	[] ->
+		add_datetime_to_packet(Name,Attrs,Els);
+	[Muc] ->
+		Now = mod_time:get_exact_timestamp(),
+	    Time = trunc(Now/1000),
+   		NewPacket = add_datetime_to_packet(Name,[{<<"msec_times">>,integer_to_binary(Now )}] ++ Attrs,
+				Els,timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(Time))),
+		Muc_Pid = Muc#muc_online_room.pid,
+		Muc_Pid ! {insert_chat_msg,LServer,From,To,From#jid.lserver,To#jid.lserver,NewPacket,Mbody,Time},
+		NewPacket
+	end.
+
+
 send_max_priority_msg(LUser,LServer,Priority,From,To,NewPacket,PrioRes) ->
-	AwayRes = get_away_resource(LUser,LServer,Priority,From,To,NewPacket,PrioRes,true),
-	case length(AwayRes) of 
-	0 ->
+    Status_and_Resources = send_msg_and_get_resources(LUser,LServer,Priority,From,To,NewPacket,PrioRes),
+	case judge_away_flag(Status_and_Resources,false) of
+	false ->
 		ok;
 	_ ->
 		#xmlel{attrs = Attrs, children = Els} = NewPacket,
 		Mtype = xml:get_attr_s(<<"type">>, Attrs),Mbody = xml:get_subtag_cdata(NewPacket, <<"body">>),
 		Delay =  xml:get_subtag_cdata(NewPacket,<<"delay">>),
 		Carbon_message = xml:get_attr_s(<<"carbon_message">>, Attrs),
-		case (Mtype == <<"normal">> orelse Mtype == <<"chat">>) andalso  Mbody /= <<>> andalso Delay /= <<"Offline Storage">>
+		case (Mtype == <<"normal">> orelse Mtype == <<"chat">>) 
+	   		andalso  Mbody /= <<>> andalso Delay /= <<"Offline Storage">>
 			andalso Carbon_message /= <<"true">> of
 		true ->
-		case mod_muc_room:is_invitation(Els) andalso xml:get_tag_attr_s(<<"msgType">>,xml:get_subtag(NewPacket,<<"body">>)) == <<"1024">> of 
-			false -> insert_away_spool(From,To,LServer,NewPacket);
+		    case (not mod_muc_room:is_invitation(Els)) andalso 
+                xml:get_tag_attr_s(<<"msgType">>,xml:get_subtag(NewPacket,<<"body">>)) =/= <<"1024">> of 
+			true -> insert_away_spool(From,To,LServer,NewPacket);
 			_ -> ok
 			end;
 		_ ->
@@ -1086,10 +1131,8 @@ send_max_priority_msg(LUser,LServer,Priority,From,To,NewPacket,PrioRes) ->
 		end
 	end.
 
-%%-----------------------------------------------------
-%%获取处理离开状态的用户resource
-%%-----------------------------------------------------
-get_away_resource(LUser,LServer,Priority,From,To,NewPacket,PrioRes,Flag) ->
+
+send_msg_and_get_resources(LUser,LServer,Priority,From,To,NewPacket,PrioRes) ->
 	lists:flatmap(fun ({P, R}) when P == Priority ->
 		LResource = jlib:resourceprep(R),
 		USR = {LUser, LServer, LResource},
@@ -1103,13 +1146,7 @@ get_away_resource(LUser,LServer,Priority,From,To,NewPacket,PrioRes,Flag) ->
 			      	Pid = element(2, Session#session.sid),
 			      	?DEBUG("sending to process ~p~n", [Pid]),
 			      	Pid ! {route, From, To, NewPacket},
-					catch case Flag andalso Session#session.show == <<"away">> 
-								andalso (str:str(LResource,<<"PC_Client">>) =/= 0 orelse str:str(LResource,<<"mac">>) =/= 0) of 
-					true ->
-						[LResource];
-					_ ->
-						[]
-					end;
+					[{Session#session.show,LResource}];
 			  _ ->
 				  	?INFO_MSG("Rescoure not match ~p : ~p ~n",[R,To#jid.lresource]), 
 					send_muc_room_remove_unavailable_user(From,To),
@@ -1120,47 +1157,340 @@ get_away_resource(LUser,LServer,Priority,From,To,NewPacket,PrioRes,Flag) ->
 	    ({_Prio, _Res}) -> []
 		end,PrioRes).
 
-%%-------------------------------------------------------
-%%修改packet，使用修改后的packet包
-%%-------------------------------------------------------
-make_new_packet(From,To,Packet,Name,Attrs,Els,Session,LServer,LResource,Flag) ->
+judge_away_flag(Resources,Offline_send_flag) ->
+	{Away_lan_num,Normal_lan_num,Away_wlan_num,Normal_wlan_num} = get_resources_num(Resources,0,0,0,0),
+	case Resources of
+	[] ->
+		case Offline_send_flag of
+		true ->
+			true;
+		_ ->
+			false
+		end;
+	_ ->
+		case Away_wlan_num + Away_lan_num =:= 0 of
+		true ->
+			false;
+		_ ->
+			case Away_lan_num > 0 of
+			true ->
+				true;
+			_ ->
+				case Away_wlan_num =/= 0 andalso Normal_lan_num =:= 0 of 
+				true ->
+					true;
+				_ ->
+					false
+				end
+			end
+		end
+	end.
+
+get_resources_num([],A_lan_num,N_lan_num,A_wlan_num,N_wlan_num) ->
+	{A_lan_num,N_lan_num,A_wlan_num,N_wlan_num};
+get_resources_num(Rs,A_lan_num,N_lan_num,A_wlan_num,N_wlan_num) ->
+	[{S,R} | L ] = Rs,
+	if  S =:=  <<"away">> ->
+		case str:str(R,<<"iPhone">>) =/= 0 orelse str:str(R,<<"Android">>) =/= 0  orelse str:str(R,<<"IOS">>) =/= 0 of
+		true ->
+			get_resources_num(L, A_lan_num,N_lan_num,A_wlan_num + 1,N_wlan_num);
+		_ ->
+			get_resources_num(L, A_lan_num+1,N_lan_num,A_wlan_num,N_wlan_num)
+		end;
+	true ->
+		case str:str(R,<<"iPhone">>) =/= 0 orelse str:str(R,<<"Android">>) =/= 0 orelse str:str(R,<<"IOS">>) =/= 0 of
+		true ->
+			get_resources_num(L, A_lan_num,N_lan_num,A_wlan_num,N_wlan_num+1);
+		_ ->
+			get_resources_num(L, A_lan_num,N_lan_num+1,A_wlan_num,N_wlan_num)
+		end
+	end.
+
+make_new_packet(From,To,Packet,Name,Attrs,Els) ->
     Mtype = xml:get_attr_s(<<"type">>, Attrs),
-    case  Mtype == <<"normal">> orelse Mtype == <<"chat">> of
+    case  Mtype == <<"normal">> orelse Mtype == <<"chat">> orelse Mtype == <<"consult">> orelse  Mtype == <<"note">> of
 	true ->
 		Reply = xml:get_attr_s(<<"auto_reply">>, Attrs),
+		Reply1 = xml:get_attr_s(<<"atuo_reply">>, Attrs),
 		Mbody = xml:get_subtag_cdata(Packet, <<"body">>),
     	Delay = xml:get_subtag_cdata(Packet,<<"delay">>),
-    	case Mbody =/= <<>> andalso Delay =/= <<"Offline Storage">> of
+    	case Mbody =/= <<>> andalso Delay =/= <<"Offline Storage">> andalso Reply =/= <<"true">>
+                andalso Reply1 =/= <<"true">> of
 		true ->
-			case Reply =/= <<"true">> of
-			true ->
-				case  ejabberd_public:is_conference_server(From#jid.lserver) of
-				false ->
-					insert_user_chat_msg(From,To,Packet,Name,Attrs,Els,Session,Mbody,LServer,LResource,Flag);
-				_ ->
-					insert_muc_chat_msg(From,To,Packet,Name,Attrs,Els,Mbody,LServer)
-				end;
-			_ ->
-				add_datetime_to_packet(Name,Attrs,Els)
-			end;
+            case xml:get_attr_s(<<"msec_times">>, Attrs)  of
+            <<"">> -> 
+			    NewPacket = add_datetime_to_packet(Name,Attrs,Els), 
+                try_insert_msg(From,To,NewPacket,Mbody),
+                NewPacket;
+            _ ->
+                ?INFO_MSG("Packet ~p ~n",[Packet]),
+                Packet
+            end;
 		_ ->
 			Packet
 		end;
 	_ ->
-		case Flag andalso Mtype == <<"groupchat">>  of
-		true ->
-		   	catch mod_monitor:monitor_count(LServer,<<"groupchat_message">>,1),
-			add_datetime_to_packet(Name,Attrs,Els);
+        Packet
+	end.
+
+
+add_datetime_to_packet(Name,Attrs,Els) ->
+	Now = mod_time:get_exact_timestamp(),
+    add_datetime_to_packet(Name,
+		[{<<"msec_times">>,integer_to_binary(Now )}] ++ Attrs,Els,
+			timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(trunc(Now/1000)))).
+
+add_datetime_to_packet(Name,Attrs,Els,Time) ->
+    #xmlel{name = Name, attrs = Attrs, children =  Els ++ [Time]}.
+
+add_msectime_to_packet(Name,Attrs,Els,Time) ->
+	#xmlel{name = Name, attrs =  [{<<"msec_times">>,integer_to_binary(Time)}] ++ Attrs, 
+			children =  Els ++ [timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(trunc(Time/1000)))]}.
+
+make_verify_friend_packet(Num,Rslt,From,To,Packet,Attrs) ->
+	Num1  = case proplists:get_value(<<"num">>,Rslt) of
+			undefined ->
+				0;
+			V  ->
+				V
+			end,
+	case Num < 300 andalso Num1 < 300 of
+	true ->
+		case proplists:get_value(<<"mode">>,Rslt) of
+		<<"0">> ->
+            do_make_verify_friend_packet(?NS_VER_FRI,<<"refused">>,<<"all_refuse">>,2);
+		<<"1">> ->
+			{Packet,1};
+		<<"2">> ->
+			case xml:get_attr_s(<<"answer">>, Attrs) == proplists:get_value(<<"answer">>,Rslt) of
+			true ->
+        		do_make_verify_friend_packet(?NS_VER_FRI,<<"success">>,<<"answer_right">>,2) ;
+			_ ->
+        		do_make_verify_friend_packet(?NS_VER_FRI,<<"refused">>,<<"answer_errror">>,2)
+			end;
+		<<"3">> ->
+                do_make_verify_friend_packet(?NS_VER_FRI,<<"success">>,<<"all_accpet">>,2);
 		_ ->
-			Packet
+       			do_make_verify_friend_packet(?NS_VER_FRI,<<"success">>,<<"default_config">>,2)
+		end;
+	false ->
+		do_make_verify_friend_packet(?NS_VER_FRI,<<"refused">>,<<"out of max friend num">>,2)
+	end.
+
+do_make_verify_friend_packet(XMLNS,Rslt,Reason,Two_ways) ->
+		{#xmlel{name = <<"presence">>,
+			attrs = [{<<"xmlns">>,XMLNS},{<<"type">>,<<"handle_friend_result">>},{<<"result">>,Rslt},{<<"reason">>,Reason}],
+		    	    children = []},Two_ways}.
+
+do_make_verify_friend_packet1(XMLNS,Rslt,Reason,Two_ways) ->
+		{#xmlel{name = <<"presence">>,
+			attrs = [{<<"xmlns">>,XMLNS},{<<"body">>,Reason}],
+		    	    children = []},Two_ways}.
+
+send_presence_packet(From,To,Packet) ->
+		PResources = get_user_present_resources(To#jid.luser, To#jid.lserver),
+		lists:foreach(fun ({_, R}) ->
+					     do_route(From,
+						      jlib:jid_replace_resource(To,
+										R),
+						      Packet)
+				     end,
+				     PResources).
+
+send_presence_packet1(From,To,Packet,Attrs) ->
+		PResources = get_user_present_resources(To#jid.luser, To#jid.lserver),
+		case PResources of 
+		[] ->
+			Body = xml:get_attr_s(<<"body">>, Attrs),
+			catch insert_presence_spool(From#jid.server,From#jid.luser,To#jid.luser,Body);	
+		_ ->
+			lists:foreach(fun ({_, R}) ->
+					     do_route(From,
+						      jlib:jid_replace_resource(To,
+										R),
+						      Packet)
+				     end,
+				     PResources)
+		end.
+
+insert_presence_spool(Server,From,To,Body) ->
+	Timestamp  = integer_to_binary(mod_time:get_timestamp()),
+	case catch ejabberd_odbc:sql_query(Server,
+		[<<"udpate invite_spool set  timestamp = ">>,Timestamp,<<",Body = '">>,Body,<<"' where username = '">>,To,<<"' and inviter = '">>,
+		From,<<"';">>]) of
+	{updated,1} ->
+		ok;
+	_ ->
+		case catch ejabberd_odbc:sql_query(Server,
+				[<<"insert into invite_spool(username,inviter,body,timestamp) values ('">>,
+						To,<<"','">>,From,<<"','">>,ejabberd_odbc:escape(Body),<<"',">>,Timestamp,<<")">>]) of
+		{updated,1} ->
+			ok;
+		_ ->
+			ok
 		end
 	end.
 
-%%-----------------------------------------------------
-%%在packet的body中添加消息时间
-%%-----------------------------------------------------
-add_datetime_to_packet(Name,Attrs,Els) ->
-	add_datetime_to_packet(Name,Attrs,Els,timestamp_to_xml(mod_time:timestamp_to_datetime_utc1(mod_time:get_timestamp()))).
+delete_presence_spool(Server,From,To) ->
+	case catch ejabberd_odbc:sql_query(Server,
+		[<<"delete from invite_spool where username = '">>,From,<<"' and inviter = '">>,To,<<"';">>]) of
+	{updated,1} ->
+		ok;
+	_ ->
+		ok
+	end.
+	
+handle_presence(LServer,From,To,Packet,Attrs) ->
+	User = To#jid.luser,
+	case xml:get_attr_s(<<"type">>, Attrs) of
+	<<"verify_friend">> ->
+		Rslt = mod_user_relation:do_verify_friend(LServer,User),
+		Num = 
+			case xml:get_attr_s(<<"friend_num">>,Attrs) of
+	    	<<>> ->
+				0;
+			N when is_binary(N) ->
+				binary_to_integer(N);
+			_ ->
+				0
+			end,
+		{NewPacket,Two_way} = make_verify_friend_packet(Num,Rslt,From,To,Packet,Attrs),
+		case Two_way of
+		1 ->
+			send_presence_packet1(From,To,NewPacket,Attrs);
+		_ ->
+			ejabberd_router:route(From,jlib:jid_replace_resource(To,<<"">>),NewPacket),
+			ejabberd_router:route(To,jlib:jid_replace_resource(From,<<"">>),xml:replace_tag_attr(<<"direction">>, <<"2">>, NewPacket))
+		end;
+	<<"manual_authentication_confirm">> ->
+		case xml:get_attr_s(<<"result">>, Attrs) of
+		<<"allow">> ->
+			Num1 =  mod_user_relation:get_users_friend_num(LServer,User),
+			Num = binary_to_integer(xml:get_attr_s(<<"friend_num">>,Attrs)),
+			case Num1 < 300 andalso Num < 300 of
+			true ->
+				{NewPacket,_} = do_make_verify_friend_packet(?NS_VER_FRI,<<"success">>,<<"manual_authentication_confirm_success">>,1),
+				ejabberd_router:route(From,jlib:jid_replace_resource(To,<<"">>),NewPacket),
+				ejabberd_router:route(To,jlib:jid_replace_resource(From,<<"">>),xml:replace_tag_attr(<<"direction">>, <<"2">>, NewPacket));
+			_ ->
+				{NewPacket,_} = do_make_verify_friend_packet(?NS_VER_FRI,<<"refused">>,<<"out of max friend num">>,1),
+				ejabberd_router:route(From,jlib:jid_replace_resource(To,<<"">>),NewPacket),
+				ejabberd_router:route(To,jlib:jid_replace_resource(From,<<"">>),xml:replace_tag_attr(<<"direction">>, <<"2">>, NewPacket))
+			end;
+		_ ->
+			ok
+		end;
+	<<"handle_friend_result">> ->
+	 	case xml:get_attr_s(<<"result">>, Attrs) of
+		<<"success">> ->
+			mod_hash_user:add_user_friend(LServer,To,From,<<"1">>),
+			send_presence_packet(From,To,Packet);
+		_ ->
+			send_presence_packet(From,To,Packet)
+		end;
+	<<"two_way_del">> ->
+		case xml:get_attr_s(<<"result">>, Attrs) of
+		<<"success">> ->
+			Del_user = xml:get_attr_s(<<"jid">>, Attrs),
+			Domain = xml:get_attr_s(<<"domain">>, Attrs),
+			catch  mod_hash_user:handle_del_friend(To#jid.lserver,To#jid.luser,Del_user,Domain,<<"1">>),
+			send_presence_packet(From,To,Packet);
+		_ ->
+			ok
+		end;
+	_ ->
+		send_presence_packet(From,To,Packet) 
+	end.
 
-add_datetime_to_packet(Name,Attrs,Els,Time) ->
-	#xmlel{name = Name, attrs = Attrs, children =  Els ++ [Time]}.
+insert_user_mucs(From,To, #xmlel{attrs = PAttrs,children = Els}) ->
+	case Els of
+	[#xmlel{name = <<"del_user">>,attrs = Attrs}] ->
+		case xml:get_attr_s(<<"xmlns">>, Attrs) of
+		?NS_MUC_DEL_USER  ->
+            catch odbc_queries:update_register_mucs(To#jid.lserver,To#jid.luser,From#jid.luser,From#jid.lserver,<<"0">>);
+		_ ->
+			ok
+		end;
+	[#xmlel{name = <<"add_user">>,attrs = Attrs}] ->
+		case xml:get_attr_s(<<"xmlns">>, Attrs) of
+		?NS_MUC_ADD_USER ->
+            catch odbc_queries:insert_user_register_mucs(To#jid.lserver,To#jid.luser,From#jid.luser,From#jid.lserver);
+		_ ->
+			ok
+		end;
+	[#xmlel{name = <<"query">>,attrs = Attrs,children = [{xmlel,<<"set_register">>,[],[]}]}] ->
+		case xml:get_attr_s(<<"xmlns">>, Attrs) of
+		?NS_MUC_REGISTER ->
+			case xml:get_attr_s(<<"type">>,PAttrs) of
+			<<"result">> ->
+                catch odbc_queries:insert_user_register_mucs(To#jid.lserver,To#jid.luser,From#jid.luser,From#jid.lserver);
+			_ ->
+				ok
+			end;
+		_ ->
+			ok
+		end;
+	_ ->
+		ok
+	end.
+	
+get_server(From_host,To_host) ->
+	if From_host =:= To_host ->
+		From_host;
+	true ->
+		lists:nth(1,ejabberd_config:get_myhosts())
+	end.
+
+check_carbon_msg(Packet) ->
+	case catch xml:get_tag_attr_s(<<"carbon_message">>, Packet) of
+	<<"true">> ->
+		true;
+	_ ->
+	    false
+	end.
+
+consult_message(From,To,Packet) ->
+    {ThirdDirection, _CN, UsrType} = case xml:get_tag_attr_s(<<"channelid">>, Packet) of
+    <<"">> ->
+        {?DIRECTION, ?CN, ?USRTYPE};
+    ChannelId ->
+        {ok, {obj, ChannelIdJson}, []} = rfc4627:decode(ChannelId),
+        {proplists:get_value("d", ChannelIdJson, ?DIRECTION),
+         proplists:get_value("cn", ChannelIdJson, ?CN),
+         proplists:get_value("usrType", ChannelIdJson, ?USRTYPE)}
+    end,
+    case ThirdDirection of
+    <<"send">> -> 
+        make_new_consult_message(From,To,Packet,UsrType);
+    ?DIRECTION ->
+        ok
+    end.        
+
+replace_subtag(#xmlel{name = Name} = Tag, Xmlel) ->
+    Xmlel#xmlel{
+        children = [Tag | lists:keydelete(Name, #xmlel.name, Xmlel#xmlel.children)]
+    }. 
+
+make_new_consult_message(From,To,Packet,UsrType) ->
+    Message1 = jlib:remove_attr(<<"channelid">>, Packet),
+    Channelid = rfc4627:encode({obj, [{"d", <<"recv">>}, {"cn", <<"consult">>}, {"usrType", UsrType}]}),
+    RToStr = xml:get_tag_attr_s(<<"realto">>, Message1),
+    RTo = jlib:string_to_jid(RToStr),
+    Body = xml:get_subtag(Message1, <<"body">>),
+  %%  Bid = list_to_binary("consult_" ++ uuid:to_string(uuid:random())),
+    Msg_id = xml:get_tag_attr_s(<<"id">>,xml:get_subtag(Packet,<<"body">>)),
+    Bid = str:concat(<<"consult_">>,Msg_id),
+    NewBody = xml:replace_tag_attr(<<"id">>, Bid, Body),
+    #xmlel{name = Name, attrs = Attrs, children = Children} = replace_subtag(NewBody, Message1),
+    Attrs2 = jlib:replace_from_to_attrs(jlib:jid_to_string(To), RToStr, Attrs),
+    NewPacket = #xmlel{name = Name, attrs = [{<<"channelid">>, Channelid}|Attrs2], children = Children},
+%    ejabberd_router:route(jlib:string_to_jid(To), RTo, NewPacket),
+
+    ejabberd_router:route(To, RTo, NewPacket).
+
+ %   Msg_id = xml:get_tag_attr_s(<<"id">>,xml:get_subtag(Packet,<<"body">>)),
+  %  Now = mod_time:get_exact_timestamp(),
+   % ?DEBUG("Packet ~p ~n",[Packet]),
+	%insert_chat_msg(To#jid.lserver,From#jid.user,To#jid.user,From#jid.lserver,To#jid.lserver, xml:element_to_binary(
+	%				Packet),body,Msg_id,Now).
+     
